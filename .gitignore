@@ -1,0 +1,10 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+
+# Private files
+config/
+
+# Generated files during training and validation
+ckpt/
+vis/
+results/
