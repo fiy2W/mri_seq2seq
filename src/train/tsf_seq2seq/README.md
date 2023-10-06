@@ -1,6 +1,6 @@
 # TSF-Seq2Seq
 
-Pytorch implementation for paper **[An Explainable Deep Framework: Towards Task-Specific Fusion for Multi-to-One MRI Synthesis](https://arxiv.org/abs/2307.00885)**
+Pytorch implementation for paper **[An Explainable Deep Framework: Towards Task-Specific Fusion for Multi-to-One MRI Synthesis](https://doi.org/10.1007/978-3-031-43999-5_5)**
 
 <p align="center">
 <img src="./asset/overview.png" alt="intro" width="85%"/>
@@ -27,10 +27,12 @@ Pre-trained Seq2Seq could be found [here](../seq2seq/README.md).
 If this repository is useful for your research, please cite:
 
 ```bib
-@article{han2023explainable,
+@inproceedings{han2023explainable,
   title={An Explainable Deep Framework: Towards Task-Specific Fusion for Multi-to-One MRI Synthesis},
-  author={Han, Luyi and Zhang, Tianyu and Huang, Yunzhi and Dou, Haoran and Wang, Xin and Gao, Yuan and Lu, Chunyao and Tao, Tan and Mann, Ritse},
-  journal={arXiv preprint arXiv:2307.00885},
-  year={2023}
+  author={Han, Luyi and Zhang, Tianyu and Huang, Yunzhi and Dou, Haoran and Wang, Xin and Gao, Yuan and Lu, Chunyao and Tan, Tao and Mann, Ritse},
+  booktitle={International Conference on Medical Image Computing and Computer-Assisted Intervention},
+  pages={45--55},
+  year={2023},
+  organization={Springer}
 }
 ```
