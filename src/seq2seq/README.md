@@ -1,6 +1,10 @@
 # Seq2Seq
 
-Pytorch implementation for paper **[Synthesis-based Imaging-Differentiation Representation Learning for Multi-Sequence 3D/4D MRI](https://arxiv.org/abs/2302.00517)**
+Pytorch implementation for paper **[Synthesis-based Imaging-Differentiation Representation Learning for Multi-Sequence 3D/4D MRI](https://doi.org/10.1016/j.media.2023.103044)**
+
+<p align="center">
+<img src="./asset/framework.png" alt="intro" width="85%"/>
+</p>
 
 ## Abstract
 > Multi-sequence MRIs can be necessary for reliable diagnosis in clinical practice due to the complimentary information within sequences. However, redundant information exists across sequences, which interferes with mining efficient representations by modern machine learning or deep learning models. To handle various clinical scenarios, we propose a sequence-to-sequence generation framework (Seq2Seq) for imaging-differentiation representation learning. In this study, not only do we propose arbitrary 3D/4D sequence generation within one model to generate any specified target sequence, but also we are able to rank the importance of each sequence based on a new metric estimating the difficulty of a sequence being generated. Furthermore, we also exploit the generation inability of the model to extract regions that contain unique information for each sequence. We conduct extensive experiments using three datasets including a toy dataset of 20,000 simulated subjects, a brain MRI dataset of 1,251 subjects, and a breast MRI dataset of 2,101 subjects, to demonstrate that (1) our proposed Seq2Seq is efficient and lightweight for complex clinical datasets and can achieve excellent image quality; (2) top-ranking sequences can be used to replace complete sequences with non-inferior performance; (3) combining MRI with our imaging-differentiation map leads to better performance in clinical tasks such as glioblastoma MGMT promoter methylation status prediction and breast cancer pathological complete response status prediction.
@@ -29,10 +33,13 @@ A list of pre-trained models is available as follows.
 If this repository is useful for your research, please cite:
 
 ```bib
-@article{han2023synthesis,
-  title={Synthesis-based Imaging-Differentiation Representation Learning for Multi-Sequence 3D/4D MRI},
+@article{han2024synthesis,
+  title={Synthesis-based imaging-differentiation representation learning for multi-sequence 3D/4D MRI},
   author={Han, Luyi and Tan, Tao and Zhang, Tianyu and Huang, Yunzhi and Wang, Xin and Gao, Yuan and Teuwen, Jonas and Mann, Ritse},
-  journal={arXiv preprint arXiv:2302.00517},
-  year={2023}
+  journal={Medical Image Analysis},
+  volume={92},
+  pages={103044},
+  year={2024},
+  publisher={Elsevier}
 }
 ```

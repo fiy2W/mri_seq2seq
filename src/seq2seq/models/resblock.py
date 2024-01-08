@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from models.seq2seq.hyperconv import hyperConv
+
+from seq2seq.models.hyperconv import hyperConv
 
 
 class ResnetBlock(nn.Module):

@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import sys
 sys.path.append('./src/')
 
-from models.seq2seq.hyperconv import hyperConv
+from seq2seq.models.hyperconv import hyperConv
 
 
 class ChannelAttention(nn.Module):

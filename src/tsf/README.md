@@ -14,7 +14,7 @@ If you would like to train models with different settings, you can define a `yam
 If you want to train the model with your data, you will likely need to customize your dataloader and training file.
 ```sh
 # Train TSF-Seq2Seq with pre-trained Seq2Seq
-python src/train/seq2seq/train_brats_tsf_seq2seq_2d.py \
+python src/seq2seq/train/train_brats_tsf_seq2seq_2d.py \
     -d cuda:0 \                                            # set device
     -c config/tsf_seq2seq_brats_2d.yaml \                  # load configuration
     -m ckpt/seq2seq/brats/2d/seq2seq_brats_2d_complete.pth # load pre-trained seq2seq weights

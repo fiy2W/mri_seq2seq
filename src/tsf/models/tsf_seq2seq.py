@@ -7,8 +7,8 @@ import torch.nn.functional as F
 import sys
 sys.path.append('./src/')
 
-from models.seq2seq.hyperconv import hyperConv
-from models.tsf_seq2seq.attention import ChannelAttention, SpatialAttention
+from seq2seq.models.hyperconv import hyperConv
+from tsf.models.attention import ChannelAttention, SpatialAttention
 
 
 class TSF_seq2seq(nn.Module):
