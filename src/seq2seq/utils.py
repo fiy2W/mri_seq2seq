@@ -5,44 +5,13 @@ import numpy as np
 import matplotlib
 from matplotlib import pyplot as plt
 from matplotlib.cm import get_cmap
+import skimage.metrics as metrics
+
+import lpips
 
 import torch
+import torch.nn as nn
 import torchvision
-
-from dlzone import dlzone
-
-
-def cal_seg_metric_for_brats(pred, mask):
-    m_et = np.zeros_like(mask)
-    m_et[mask==4] = 1
-    p_et = np.zeros_like(pred)
-    p_et[pred==4] = 1
-    et_dsc = dlzone.metrics.segmentation.dice_coefficient_similarity(p_et, m_et)[1]
-    #et_hd = dlzone.metrics.segmentation.hausdorff_distance_95th(p_et, m_et)[1]
-    et_assd = dlzone.metrics.segmentation.average_symmetric_surface_distance(p_et, m_et)[1]
-
-    m_tc = np.zeros_like(mask)
-    m_tc[mask==1] = 1
-    m_tc[mask==4] = 1
-    p_tc = np.zeros_like(pred)
-    p_tc[pred==1] = 1
-    p_tc[pred==4] = 1
-    tc_dsc = dlzone.metrics.segmentation.dice_coefficient_similarity(p_tc, m_tc)[1]
-    #tc_hd = dlzone.metrics.segmentation.hausdorff_distance_95th(p_tc, m_tc)[1]
-    tc_assd = dlzone.metrics.segmentation.average_symmetric_surface_distance(p_tc, m_tc)[1]
-
-    m_wt = np.zeros_like(mask)
-    m_wt[mask==1] = 1
-    m_wt[mask==2] = 1
-    m_wt[mask==4] = 1
-    p_wt = np.zeros_like(pred)
-    p_wt[pred==1] = 1
-    p_wt[pred==2] = 1
-    p_wt[pred==4] = 1
-    wt_dsc = dlzone.metrics.segmentation.dice_coefficient_similarity(p_wt, m_wt)[1]
-    #wt_hd = dlzone.metrics.segmentation.hausdorff_distance_95th(p_wt, m_wt)[1]
-    wt_assd = dlzone.metrics.segmentation.average_symmetric_surface_distance(p_wt, m_wt)[1]
-    return et_dsc, tc_dsc, wt_dsc, et_assd, tc_assd, wt_assd
 
 
 class Plotter(object):
@@ -177,3 +146,31 @@ def poly_lr(epoch: int, max_epochs: int, initial_lr: float, min_lr: float=1e-5, 
 def torch_PSNR(image_true, image_test, data_range=255.):
     mse = torch.mean((image_true - image_test) ** 2)
     return 10 * torch.log10(data_range**2 / mse)
+
+class torch_LPIPS(nn.Module):
+    def __init__(self, net='alex') -> None:
+        """
+        net : str
+            ['alex','vgg','squeeze'] are the base/trunk networks available
+        """
+        super().__init__()
+        self.loss = lpips.LPIPS(net=net)
+    
+    @torch.no_grad()
+    def forward(self, image_true, image_test):
+        return self.loss(image_true, image_test)
+
+
+def np_PSNR(image_true, image_test, data_range=255.):
+    return metrics.peak_signal_noise_ratio(image_true, image_test, data_range=data_range)
+
+
+def np_PSNR_mask(image_true, image_test, mask, data_range=255.):
+    image_true = image_true[mask>0.5]
+    image_test = image_test[mask>0.5]
+    mse = np.mean((image_true - image_test) ** 2)
+    return 10 * np.log10(data_range**2 / mse)
+
+
+def np_SSIM(image_true, image_test, data_range=255.):
+    return metrics.structural_similarity(image_true, image_test, data_range=data_range)

@@ -3,7 +3,7 @@
 Pytorch implementation for paper **[Synthesis-based Imaging-Differentiation Representation Learning for Multi-Sequence 3D/4D MRI](https://doi.org/10.1016/j.media.2023.103044)**
 
 <p align="center">
-<img src="./asset/framework.png" alt="intro" width="85%"/>
+<img src="./asset/framework.png" alt="intro" width="100%"/>
 </p>
 
 ## Abstract
@@ -18,6 +18,54 @@ python src/train/seq2seq/train_brats_seq2seq_2d.py \
     -d cuda:0 \                                           # set device
     -c config/seq2seq_brats_2d_missing.yaml \             # load configuration
     -l ckpt/seq2seq/brats/2d/seq2seq_brats_2d_missing.pth # load pre-trained weights or omit this to train from beginning
+```
+
+## Evaluation
+### Synthesis Performance
+Evaluate the model with three reconstruction metrics: PSNR, SSIM, and LPIPS.
+
+Install package for LPIPS.
+```sh
+pip install lpips
+```
+
+Inference model and save predicted images, then calculate and save the metrics.
+```sh
+python src/seq2seq/test/test_brats_seq2seq_2d_metrics.py \
+    -d cuda:0 \                                             # set device
+    -c config/seq2seq_brats_2d_missing.yaml \               # load configuration
+    -l ckpt/seq2seq/brats/2d/seq2seq_brats_2d_missing.pth \ # load pre-trained weights or omit this to train from beginning
+    -o results/seq2seq/brats/2d/                            # direction to save results and metrcis
+```
+
+Quantitative results for sequence translation in the paper.
+
+<p align="center">
+<img src="./asset/table2.png" alt="table2" width="100%"/>
+</p>
+
+### Sequence Contribution
+Calculate $\mathcal{C}_t$ and $\mathcal{C}_d$ to evalate the contribution for each sequence.
+```sh
+python src/seq2seq/test/cal_brats_seq2seq_2d_contribution.py \
+    -f results/seq2seq/brats/2d/result_metrics.csv \ # file path of metrics
+    -n 4                                             # number of sequence
+```
+
+Contribution for each sequence in the paper.
+
+<p align="center">
+<img src="./asset/table3.png" alt="table3" width="50%"/>
+</p>
+
+### Imaging-Differentiation Map
+Calculate $\mathcal{M}_d$ for each sequence.
+```sh
+python src/seq2seq/test/pred_brats_seq2seq_2d_md.py \
+    -d cuda:0 \                                             # set device
+    -c config/seq2seq_brats_2d_missing.yaml \               # load configuration
+    -l ckpt/seq2seq/brats/2d/seq2seq_brats_2d_missing.pth \ # load pre-trained weights or omit this to train from beginning
+    -o results/seq2seq/brats/2d/                            # direction to save results
 ```
 
 ## Pre-trained Models
