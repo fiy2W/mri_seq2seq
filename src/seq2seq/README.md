@@ -32,10 +32,10 @@ pip install lpips
 Inference model and save predicted images, then calculate and save the metrics.
 ```sh
 python src/seq2seq/test/test_brats_seq2seq_2d_metrics.py \
-    -d cuda:0 \                                             # set device
-    -c config/seq2seq_brats_2d_missing.yaml \               # load configuration
-    -l ckpt/seq2seq/brats/2d/seq2seq_brats_2d_missing.pth \ # load pre-trained weights or omit this to train from beginning
-    -o results/seq2seq/brats/2d/                            # direction to save results and metrcis
+    -d cuda:0 \                               # set device
+    -c config/seq2seq_brats_2d_missing.yaml \ # load configuration
+    -l ckpt/seq2seq/brats/2d/ckpt_best.pth \  # load seq2seq weights
+    -o results/seq2seq/brats/2d/              # direction to save results and metrcis
 ```
 
 Quantitative results for sequence translation in the paper.
@@ -62,11 +62,17 @@ Contribution for each sequence in the paper.
 Calculate $\mathcal{M}_d$ for each sequence.
 ```sh
 python src/seq2seq/test/pred_brats_seq2seq_2d_md.py \
-    -d cuda:0 \                                             # set device
-    -c config/seq2seq_brats_2d_missing.yaml \               # load configuration
-    -l ckpt/seq2seq/brats/2d/seq2seq_brats_2d_missing.pth \ # load pre-trained weights or omit this to train from beginning
-    -o results/seq2seq/brats/2d/                            # direction to save results
+    -d cuda:0 \                               # set device
+    -c config/seq2seq_brats_2d_missing.yaml \ # load configuration
+    -l ckpt/seq2seq/brats/2d/ckpt_best.pth \  # load seq2seq weights
+    -o results/seq2seq/brats/2d/              # direction to save results
 ```
+
+Visualization of $\mathcal{M}_d$.
+
+<p align="center">
+<img src="./asset/fig9.png" alt="fig9" width="100%"/>
+</p>
 
 ## Pre-trained Models
 Download the configuration file and corresponding pre-trained weight from [here](https://drive.google.com/drive/folders/1aygogtHrr1WqHSWAgovHUgEpe-4lQd38?usp=sharing).

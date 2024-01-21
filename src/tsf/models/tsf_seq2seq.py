@@ -53,11 +53,11 @@ class TSF_seq2seq(nn.Module):
                 self.norms.append(nn.LeakyReLU(0.2, True))
             c_pre = c
 
-        if 'segmentor' in args:
-            self.segmentor = Segmentor2d(args)
+        #if 'segmentor' in args:
+        #    self.segmentor = Segmentor2d(args)
         
-        if 'classifier' in args:
-            self.classifier = Classifier2d(args)
+        #if 'classifier' in args:
+        #    self.classifier = Classifier2d(args)
             
     def tsp_attention(self, x, seq_code, skip_attn=False, eps=1e-5):
         res = x
@@ -109,8 +109,17 @@ class TSF_seq2seq(nn.Module):
 
         if task=='rec':
             y = seq2seq.dec(xs[0].shape, feats.unsqueeze(1), target_seq, n_outseq=n_outseq)
-        elif task=='seg':
-            y = self.segmentor(feats)
-        elif task=='cls':
-            y = self.classifier(feats)
+        #elif task=='seg':
+        #    y = self.segmentor(feats)
+        #elif task=='cls':
+        #    y = self.classifier(feats)
         return y
+    
+    @torch.no_grad()
+    def output_param(self, source_seqs, target_seq, eps=1e-5):
+        target_s = target_seq[:,:self.seq_out]
+        seq_code = torch.cat([source_seqs, target_s], dim=1)
+        seq_in = seq_code[:, :self.seq_in].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+        param = self.fc_p(seq_code).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1) + eps # + eps to avoid dividing 0
+        param = (seq_in * param) / torch.sum(seq_in*param)
+        return param
