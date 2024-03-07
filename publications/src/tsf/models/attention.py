@@ -3,9 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import sys
-sys.path.append('./src/')
+sys.path.append('./publications/')
 
-from seq2seq.models.hyperconv import hyperConv
+from src.seq2seq.models.hyperconv import hyperConv
 
 
 class ChannelAttention(nn.Module):

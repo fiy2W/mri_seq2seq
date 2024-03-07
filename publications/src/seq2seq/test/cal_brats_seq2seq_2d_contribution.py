@@ -46,17 +46,21 @@ if __name__ == '__main__':
                 all_psnr2.append(psnr)
                 all_ssim2.append(ssim)
                 all_lpips2.append(lpips)
-
+    
+    
     A = [[0 for i in range(N)] for i in range(N)]
+    eps = 1e-9
 
     for i in range(N):
-        for j in range(N):    
-            npsnr = (np.mean(result_psnr[i][j])-np.mean(all_psnr))/np.std(all_psnr)
-            nssim = (np.mean(result_ssim[i][j])-np.mean(all_ssim))/np.std(all_ssim)
-            nlpips = (np.mean(result_lpips[i][j])-np.mean(all_lpips))/np.std(all_lpips)
+        for j in range(N):
+            if len(result_psnr[i][j])==0:
+                continue
+            npsnr = (np.nanmean(result_psnr[i][j])-np.nanmean(all_psnr))/(np.nanstd(all_psnr) + eps)
+            nssim = (np.nanmean(result_ssim[i][j])-np.nanmean(all_ssim))/(np.nanstd(all_ssim) + eps)
+            nlpips = (np.nanmean(result_lpips[i][j])-np.nanmean(all_lpips))/(np.nanstd(all_lpips) + eps)
             A[i][j] = npsnr + nssim - nlpips
 
-
+    print(A)
     for i in range(N):
         metric_ct = 0
         metric_cd = 0

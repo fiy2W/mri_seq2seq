@@ -13,12 +13,12 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 import sys
-sys.path.append('./src/')
+sys.path.append('./publications/')
 
-from seq2seq.utils import torch_lpips, np_PSNR, np_SSIM
-from seq2seq.dataloader.brats import Dataset_brats
-from seq2seq.models.seq2seq import Generator
-from tsf.models.tsf_seq2seq import TSF_seq2seq
+from src.seq2seq.utils import torch_LPIPS, np_PSNR, np_SSIM
+from src.seq2seq.dataloader.brats import Dataset_brats
+from src.seq2seq.models.seq2seq import Generator
+from src.tsf.models.tsf_seq2seq import TSF_seq2seq
 
 
 def test(args, net, seq2seq, device, dir_results):
@@ -31,7 +31,9 @@ def test(args, net, seq2seq, device, dir_results):
 
     with open(os.path.join(dir_results, 'result_metrics.csv'), 'w') as f:
         f.write('name,n_src,tgt,psnr,ssim,lpips\n')
-        
+    
+    torch_lpips = torch_LPIPS().to(device=device)
+    
     with torch.no_grad():
         net.eval()
         seq2seq.eval()
@@ -75,18 +77,26 @@ def test(args, net, seq2seq, device, dir_results):
                     source_imgs = [inputs[src] for src in flags]
                     target_img = inputs[tgt]
                     target_code = torch.from_numpy(np.array([1 if i==tgt else 0 for i in range(c_s)])).reshape((1,c_s)).to(device=device, dtype=torch.float32)
-                    rec1 = net(seq2seq, source_imgs, flags, target_code, n_outseq=target_img.shape[1], task_attn=True, skip_attn=False)
-                    rec2 = net(seq2seq, source_imgs, flags, target_code, n_outseq=target_img.shape[1], task_attn=True, skip_attn=True)
-
-                    tgtimg = target_img[:,0,1].cpu().numpy()
-                    tsem = torch.abs(rec1-rec2)[:,0,1].cpu().numpy()
+                    output_target = net(seq2seq, source_imgs, flags, target_code, n_outseq=target_img.shape[1])
                     
-                    dir_pred = os.path.join(dir_results, 'tsem')
+                    tgtimg = target_img[:,0,1:2]
+                    preimg = output_target[:,0,1:2]
+                    lpips = torch_lpips(tgtimg, preimg).sum().item()
+                            
+                    preimg = preimg[:,0].cpu().numpy()
+                    tgtimg = tgtimg[:,0].cpu().numpy()
+                    psnr = np_PSNR(tgtimg, preimg, data_range=2.)
+                    ssim = np_SSIM(tgtimg, preimg, data_range=2.)
+                    print(name, n_src, tgt, psnr, ssim, lpips)
+                    
+                    dir_pred = os.path.join(dir_results, 'predict')
                     os.makedirs(dir_pred, exist_ok=True)
 
-                    sitk.WriteImage(sitk.GetImageFromArray(tsem), os.path.join(dir_pred, '{}_tsem_{}.nii.gz'.format(name, tgt)))
                     sitk.WriteImage(sitk.GetImageFromArray(tgtimg), os.path.join(dir_pred, '{}_tgt_{}.nii.gz'.format(name, tgt)))
+                    sitk.WriteImage(sitk.GetImageFromArray(preimg), os.path.join(dir_pred, '{}_pred_{}.nii.gz'.format(name, tgt)))
 
+                    with open(os.path.join(dir_results, 'result_metrics.csv'), 'a+') as f:
+                        f.write('{},{},{},{},{},{}\n'.format(name, n_src, tgt, psnr, ssim, lpips))
 
 def get_args():
     parser = argparse.ArgumentParser(description='Test seq2seq model',

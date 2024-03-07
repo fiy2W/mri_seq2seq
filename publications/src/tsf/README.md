@@ -14,10 +14,10 @@ If you would like to train models with different settings, you can define a `yam
 If you want to train the model with your data, you will likely need to customize your dataloader and training file.
 ```sh
 # Train TSF-Seq2Seq with pre-trained Seq2Seq
-python src/tsf/train/train_brats_tsf_seq2seq_2d.py \
-    -d cuda:0 \                                            # set device
-    -c config/tsf_seq2seq_brats_2d.yaml \                  # load configuration
-    -m ckpt/seq2seq/brats/2d/seq2seq_brats_2d_complete.pth # load pre-trained seq2seq weights
+python publications/src/tsf/train/train_brats_tsf_seq2seq_2d.py \
+    -d cuda:0 \                                                     # set device
+    -c publications/config/tsf/tsf_seq2seq_brats_2d.yaml \          # load configuration
+    -m outputs/ckpt/seq2seq/brats/2d/seq2seq_brats_2d_complete.pth  # load pre-trained seq2seq weights
 ```
 
 ## Evaluation
@@ -31,12 +31,12 @@ pip install lpips
 
 Inference model and save predicted images, then calculate and save the metrics.
 ```sh
-python src/tsf/test/test_brats_tsf_2d_metrics.py \
-    -d cuda:0 \                                        # set device
-    -c config/tsf_seq2seq_brats_2d.yaml \              # load configuration
-    -m ckpt/tsf_seq2seq/brats/2d/ckpt_seq2seq_best.pth # load seq2seq weights
-    -l ckpt/tsf_seq2seq/brats/2d/ckpt_best.pth \       # load tsf weights
-    -o results/tsf_seq2seq/brats/2d/                   # direction to save results and metrcis
+python publications/src/tsf/test/test_brats_tsf_2d_metrics.py \
+    -d cuda:0 \                                                   # set device
+    -c publications/config/tsf/tsf_seq2seq_brats_2d.yaml \        # load configuration
+    -m outputs/ckpt/tsf_seq2seq/brats/2d/ckpt_seq2seq_best.pth \  # load seq2seq weights
+    -l outputs/ckpt/tsf_seq2seq/brats/2d/ckpt_best.pth \          # load tsf weights
+    -o outputs/results/tsf_seq2seq/brats/2d/                      # direction to save results and metrcis
 ```
 
 Quantitative results for sequence translation in the paper.
@@ -48,10 +48,10 @@ Quantitative results for sequence translation in the paper.
 ### Sequence Contribution
 Output sequence weights $\omega$ for specific task code $c$.
 ```sh
-python src/tsf/test/cal_tsf_weigts.py \
-    -d cuda:0 \                                  # set device
-    -c config/tsf_seq2seq_brats_2d.yaml \        # load configuration
-    -l ckpt/tsf_seq2seq/brats/2d/ckpt_best.pth \ # load tsf weights
+python publications/src/tsf/test/cal_tsf_weigts.py \
+    -d cuda:0 \                                         # set device
+    -c publications/config/tsf_seq2seq_brats_2d.yaml \  # load configuration
+    -l outputs/ckpt/tsf_seq2seq/brats/2d/ckpt_best.pth  # load tsf weights
 ```
 
 Visualization of weights of sequences for synthesis task.
@@ -63,12 +63,12 @@ Visualization of weights of sequences for synthesis task.
 ### Task-Specific Enhanced Map (TSEM)
 Calculate TSEM for each combination of sequences.
 ```sh
-python src/tsf/test/pred_brats_tsf_2d_tsem.py \
-    -d cuda:0 \                                        # set device
-    -c config/tsf_seq2seq_brats_2d.yaml \              # load configuration
-    -m ckpt/tsf_seq2seq/brats/2d/ckpt_seq2seq_best.pth # load seq2seq weights
-    -l ckpt/tsf_seq2seq/brats/2d/ckpt_best.pth \       # load tsf weights
-    -o results/tsf_seq2seq/brats/2d/                   # direction to save results and metrcis
+python publications/src/tsf/test/pred_brats_tsf_2d_tsem.py \
+    -d cuda:0 \                                                   # set device
+    -c publications/config/tsf/tsf_seq2seq_brats_2d.yaml \        # load configuration
+    -m outputs/ckpt/tsf_seq2seq/brats/2d/ckpt_seq2seq_best.pth \  # load seq2seq weights
+    -l outputs/ckpt/tsf_seq2seq/brats/2d/ckpt_best.pth \          # load tsf weights
+    -o outputs/results/tsf_seq2seq/brats/2d/                      # direction to save results and metrcis
 ```
 
 Visualization of TSEM.

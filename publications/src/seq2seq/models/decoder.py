@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 
-from seq2seq.models.hyperconv import hyperConv
-from seq2seq.models.resblock import hyperResnetBlock
+from src.seq2seq.models.hyperconv import hyperConv
+from src.seq2seq.models.resblock import hyperResnetBlock
 
 
 class hyperDecoder(nn.Module):

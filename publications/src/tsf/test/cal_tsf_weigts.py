@@ -13,10 +13,10 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 import sys
-sys.path.append('./src/')
+sys.path.append('./publications/')
 
-from seq2seq.models.seq2seq import Generator
-from tsf.models.tsf_seq2seq import TSF_seq2seq
+from src.seq2seq.models.seq2seq import Generator
+from src.tsf.models.tsf_seq2seq import TSF_seq2seq
 
 
 def get_args():
@@ -64,4 +64,4 @@ if __name__ == '__main__':
                 target_code = torch.from_numpy(np.array([1 if i==tgt else 0 for i in range(c_s)])).reshape((1,c_s)).to(device=device, dtype=torch.float32)
                 params = net.output_param(source_seqs=source, target_seq=target_code)
 
-                print('source:', source, 'target:', tgt, 'Weights:', params)
+                print('source:', source, 'target:', tgt, 'Weights:', params.cpu().reshape(-1).numpy().tolist())

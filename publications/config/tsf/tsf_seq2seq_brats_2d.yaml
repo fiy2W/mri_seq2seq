@@ -1,9 +1,9 @@
 data:
   image: /root/to/brats/image
-  train: data_list/brats/gen/train.csv
-  valid: data_list/brats/gen/valid.csv
-  test:  data_list/brats/gen/test.csv
-  nomiss: False
+  train: publications/data_list/brats/gen/train.csv
+  valid: publications/data_list/brats/gen/valid.csv
+  test:  publications/data_list/brats/gen/test.csv
+  nomiss: True
   
 seq2seq:
   ndims: 2                # 2D model
@@ -20,12 +20,22 @@ seq2seq:
   k_dec: [3, 3, 7]        # ksize for decoder
   s_dec: [1, 1, 1]        # strides for decoder
   nres_dec: 6             # number of resblocks in decoder
+  pretrain: /path/to/pretrain/seq2seq/ckpt_best.pth
+
+TSF_seq2seq:
+  c_s_source: 4
+  c_s_target: 4
+  c_w: 4
+  c_enc: [256]            # channels for encoder
+  k_enc: [3]              # ksize for encoder
+  s_enc: [1]              # strides for encoder
+  norm: None              # normalization
 
 train:
-  epochs: 1000
-  total_steps: 1000000
-  lr: 2e-4
-  rep_step: 8
+  epochs: 500
+  total_steps: 300000
+  lr: 1e-4
+  rep_step: 4
   crop_size: [1, 192, 192]
   valid_size: [16, 192, 192]
   lambda_rec: 10
@@ -33,5 +43,5 @@ train:
   lambda_cyc: 10
   vis_steps: 128
   ckpt_steps: 1280
-  vis: vis/seq2seq/brats/2d
-  ckpt: ckpt/seq2seq/brats/2d
+  vis: outputs/vis/tsf_seq2seq/brats/2d
+  ckpt: outputs/ckpt/tsf_seq2seq/brats/2d

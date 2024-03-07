@@ -12,12 +12,12 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 import sys
-sys.path.append('./src/')
+sys.path.append('./publications/')
 
-from seq2seq.utils import poly_lr, Recorder, Plotter, save_grid_images, torch_PSNR
-from seq2seq.losses import PerceptualLoss
-from seq2seq.dataloader.brats import Dataset_brats
-from seq2seq.models.seq2seq import Generator
+from src.seq2seq.utils import poly_lr, Recorder, Plotter, save_grid_images, torch_PSNR
+from src.seq2seq.losses import PerceptualLoss
+from src.seq2seq.dataloader.brats import Dataset_brats
+from src.seq2seq.models.seq2seq import Generator
 
 
 def train(args, net, device):
@@ -112,6 +112,9 @@ def train(args, net, device):
 
                     source_img = inputs[source_seq]
                     target_img = inputs[target_seq]
+
+                    if torch.abs(torch.mean(source_img) + 1)<1e-8:
+                        continue
 
                     source_code = torch.from_numpy(np.array([1 if i==source_seq else 0 for i in range(c_s)])).reshape((1,c_s)).to(device=device, dtype=torch.float32)
                     target_code = torch.from_numpy(np.array([1 if i==target_seq else 0 for i in range(c_s)])).reshape((1,c_s)).to(device=device, dtype=torch.float32)

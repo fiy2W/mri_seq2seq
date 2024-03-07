@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from seq2seq.models.convlstm import ConvLSTM2d, ConvLSTM3d
-from seq2seq.models.encoder import Encoder
-from seq2seq.models.decoder import hyperDecoder
+from src.seq2seq.models.convlstm import ConvLSTM2d, ConvLSTM3d
+from src.seq2seq.models.encoder import Encoder
+from src.seq2seq.models.decoder import hyperDecoder
 
 
 class Generator(nn.Module):

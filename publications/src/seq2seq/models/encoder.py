@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from seq2seq.models.resblock import ResnetBlock
+from src.seq2seq.models.resblock import ResnetBlock
 
 
 class Encoder(nn.Module):

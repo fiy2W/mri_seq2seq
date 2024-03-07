@@ -14,10 +14,10 @@ If you would like to train models with different settings, you can define a `yam
 If you want to train the model with your data, you will likely need to customize your dataloader and training file.
 ```sh
 # Seq2Seq
-python src/train/seq2seq/train_brats_seq2seq_2d.py \
-    -d cuda:0 \                                           # set device
-    -c config/seq2seq_brats_2d_missing.yaml \             # load configuration
-    -l ckpt/seq2seq/brats/2d/seq2seq_brats_2d_missing.pth # load pre-trained weights or omit this to train from beginning
+python publications/src/seq2seq/train/train_brats_seq2seq_2d.py \
+    -d cuda:0 \                                                     # set device
+    -c publications/config/seq2seq/seq2seq_brats_2d_missing.yaml \  # load configuration
+    -l outputs/ckpt/seq2seq/brats/2d/seq2seq_brats_2d_missing.pth   # load pre-trained weights or omit this to train from beginning
 ```
 
 ## Evaluation
@@ -31,11 +31,11 @@ pip install lpips
 
 Inference model and save predicted images, then calculate and save the metrics.
 ```sh
-python src/seq2seq/test/test_brats_seq2seq_2d_metrics.py \
-    -d cuda:0 \                               # set device
-    -c config/seq2seq_brats_2d_missing.yaml \ # load configuration
-    -l ckpt/seq2seq/brats/2d/ckpt_best.pth \  # load seq2seq weights
-    -o results/seq2seq/brats/2d/              # direction to save results and metrcis
+python publications/src/seq2seq/test/test_brats_seq2seq_2d_metrics.py \
+    -d cuda:0 \                                                     # set device
+    -c publications/config/seq2seq/seq2seq_brats_2d_missing.yaml \  # load configuration
+    -l outputs/ckpt/seq2seq/brats/2d/ckpt_best.pth \                # load seq2seq weights
+    -o outputs/results/seq2seq/brats/2d/                            # direction to save results and metrcis
 ```
 
 Quantitative results for sequence translation in the paper.
@@ -47,9 +47,9 @@ Quantitative results for sequence translation in the paper.
 ### Sequence Contribution
 Calculate $\mathcal{C}_t$ and $\mathcal{C}_d$ to evalate the contribution for each sequence.
 ```sh
-python src/seq2seq/test/cal_brats_seq2seq_2d_contribution.py \
-    -f results/seq2seq/brats/2d/result_metrics.csv \ # file path of metrics
-    -n 4                                             # number of sequence
+python publications/src/seq2seq/test/cal_brats_seq2seq_2d_contribution.py \
+    -f outputs/results/seq2seq/brats/2d/result_metrics.csv \  # file path of metrics
+    -n 4                                                      # number of sequence
 ```
 
 Contribution for each sequence in the paper.
@@ -61,11 +61,11 @@ Contribution for each sequence in the paper.
 ### Imaging-Differentiation Map
 Calculate $\mathcal{M}_d$ for each sequence.
 ```sh
-python src/seq2seq/test/pred_brats_seq2seq_2d_md.py \
-    -d cuda:0 \                               # set device
-    -c config/seq2seq_brats_2d_missing.yaml \ # load configuration
-    -l ckpt/seq2seq/brats/2d/ckpt_best.pth \  # load seq2seq weights
-    -o results/seq2seq/brats/2d/              # direction to save results
+python publications/src/seq2seq/test/pred_brats_seq2seq_2d_md.py \
+    -d cuda:0 \                                                     # set device
+    -c publications/config/seq2seq/seq2seq_brats_2d_missing.yaml \  # load configuration
+    -l outputs/ckpt/seq2seq/brats/2d/ckpt_best.pth \                # load seq2seq weights
+    -o outputs/results/seq2seq/brats/2d/                            # direction to save results
 ```
 
 Visualization of $\mathcal{M}_d$.

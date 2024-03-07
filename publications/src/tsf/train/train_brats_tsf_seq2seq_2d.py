@@ -12,13 +12,13 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 import sys
-sys.path.append('./src/')
+sys.path.append('./publications/')
 
-from seq2seq.utils import poly_lr, Recorder, Plotter, save_grid_images, torch_PSNR
-from seq2seq.losses import PerceptualLoss
-from seq2seq.dataloader.brats import Dataset_brats
-from seq2seq.models.seq2seq import Generator
-from tsf.models.tsf_seq2seq import TSF_seq2seq
+from src.seq2seq.utils import poly_lr, Recorder, Plotter, save_grid_images, torch_PSNR
+from src.seq2seq.losses import PerceptualLoss
+from src.seq2seq.dataloader.brats import Dataset_brats
+from src.seq2seq.models.seq2seq import Generator
+from src.tsf.models.tsf_seq2seq import TSF_seq2seq
 
 
 def train(args, net, seq2seq, device):

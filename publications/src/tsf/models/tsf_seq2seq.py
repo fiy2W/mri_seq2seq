@@ -5,10 +5,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import sys
-sys.path.append('./src/')
+sys.path.append('./publications/')
 
-from seq2seq.models.hyperconv import hyperConv
-from tsf.models.attention import ChannelAttention, SpatialAttention
+from src.seq2seq.models.hyperconv import hyperConv
+from src.tsf.models.attention import ChannelAttention, SpatialAttention
 
 
 class TSF_seq2seq(nn.Module):
@@ -117,6 +117,7 @@ class TSF_seq2seq(nn.Module):
     
     @torch.no_grad()
     def output_param(self, source_seqs, target_seq, eps=1e-5):
+        source_seqs = torch.from_numpy(np.array([1 if i in source_seqs else 0 for i in range(self.seq_in)])).reshape((1,self.seq_in)).to(device=target_seq.device, dtype=torch.float32)
         target_s = target_seq[:,:self.seq_out]
         seq_code = torch.cat([source_seqs, target_s], dim=1)
         seq_in = seq_code[:, :self.seq_in].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
