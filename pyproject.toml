@@ -1,0 +1,62 @@
+[project]
+name = "nnseq2seq"
+version = "0.0.1"
+requires-python = ">=3.9"
+description = "nnSeq2Seq is a framework for out-of-the-box image-to-image translation."
+readme = "readme.md"
+license = { file = "licence" }
+authors = [
+]
+classifiers = [
+]
+keywords = [
+]
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision",
+    "acvl-utils>=0.2,<0.3",  # 0.3 may bring breaking changes. Careful!
+    "dynamic-network-architectures>=0.2,<0.4",  # 0.3.1 and lower are supported, 0.4 may have breaking changes. Let's be careful here
+    "tqdm",
+    "dicom2nifti",
+    "scipy",
+    "batchgenerators>=0.25",
+    "numpy",
+    "scikit-learn",
+    "scikit-image>=0.19.3",
+    "SimpleITK>=2.2.1",
+    "pandas",
+    "graphviz",
+    'tifffile',
+    'requests',
+    "nibabel",
+    "matplotlib",
+    "seaborn",
+    "imagecodecs",
+    "yacs",
+    "lpips",
+    "timm",
+]
+
+[tool.setuptools.packages.find]
+include = ["nnseq2seq"]
+
+[project.urls]
+homepage = "https://github.com/fiy2W/mri_seq2seq"
+repository = "https://github.com/fiy2W/mri_seq2seq"
+
+[project.scripts]
+nnSeq2Seq_plan_and_preprocess = "nnseq2seq.experiment_planning.plan_and_preprocess_entrypoints:plan_and_preprocess_entry"
+nnSeq2Seq_train = "nnseq2seq.run.run_training:run_training_entry"
+nnSeq2Seq_predict = "nnseq2seq.inference.predict_from_raw_data:predict_entry_point"
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "ruff",
+    "pre-commit"
+]
+
+[tool.codespell]
+skip = '.git,*.pdf,*.svg'
+#
+# ignore-words-list = ''
