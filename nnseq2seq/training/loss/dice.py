@@ -50,7 +50,7 @@ class SoftDiceLoss(nn.Module):
                 dc = dc[1:]
             else:
                 dc = dc[:, 1:]
-        dc = dc.mean()
+        #dc = dc.mean()
 
         return -dc
 

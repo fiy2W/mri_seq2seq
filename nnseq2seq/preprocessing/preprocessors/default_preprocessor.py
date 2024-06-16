@@ -62,7 +62,7 @@ class DefaultPreprocessor(object):
         # normalize
         # normalization MUST happen before resampling or we get huge problems with resampled nonzero masks no
         # longer fitting the images perfectly!
-        data = self._normalize(data, seg, configuration_manager,
+        data = self._normalize(data, seg, properties['available_channel'], configuration_manager,
                                plans_manager.foreground_intensity_properties_per_channel)
 
         # print('current shape', data.shape[1:], 'current_spacing', original_spacing,
@@ -118,6 +118,7 @@ class DefaultPreprocessor(object):
         data, data_properties = rw.read_images(image_files)
         data_properties['available_channel'] = [np.int64(os.path.basename(fname).split('_')[-1].replace(dataset_json['file_ending'], '')) for fname in image_files]
         data_properties['num_channel'] = dataset_json['numChannel']
+        data_properties['anchor_domain'] = [ac for ac in data_properties['available_channel'] if dataset_json['channel_names'][str(ac)] in ['Canny'] or 'anchor' in dataset_json['channel_names'][str(ac)]]
 
         # if possible, load seg
         if seg_file is not None:
@@ -127,6 +128,13 @@ class DefaultPreprocessor(object):
 
         data, seg = self.run_case_npy(data, seg, data_properties, plans_manager, configuration_manager,
                                       dataset_json)
+        
+        # set weight for fake seg
+        data_properties['real_seg'] = True
+        if 'foreground' in dataset_json['labels'].keys():
+            if np.sum(seg==dataset_json['labels'])>0:
+                data_properties['real_seg'] = False
+
         return data, seg, data_properties
 
     def run_case_save(self, output_filename_truncated: str, image_files: List[str], seg_file: str,
@@ -166,17 +174,17 @@ class DefaultPreprocessor(object):
                 print(c, target_num_samples)
         return class_locs
 
-    def _normalize(self, data: np.ndarray, seg: np.ndarray, configuration_manager: ConfigurationManager,
+    def _normalize(self, data: np.ndarray, seg: np.ndarray, available_sequence: List[int], configuration_manager: ConfigurationManager,
                    foreground_intensity_properties_per_channel: dict) -> np.ndarray:
-        for c in range(data.shape[0]):
-            scheme = configuration_manager.normalization_schemes[c]
+        for c, cseq in enumerate(available_sequence):
+            scheme = configuration_manager.normalization_schemes[cseq]
             normalizer_class = recursive_find_python_class(join(nnseq2seq.__path__[0], "preprocessing", "normalization"),
                                                            scheme,
                                                            'nnseq2seq.preprocessing.normalization')
             if normalizer_class is None:
                 raise RuntimeError(f'Unable to locate class \'{scheme}\' for normalization')
-            normalizer = normalizer_class(use_mask_for_norm=configuration_manager.use_mask_for_norm[c],
-                                          intensityproperties=foreground_intensity_properties_per_channel[str(c)])
+            normalizer = normalizer_class(use_mask_for_norm=configuration_manager.use_mask_for_norm[cseq],
+                                          intensityproperties=foreground_intensity_properties_per_channel[str(cseq)])
             data[c] = normalizer.run(data[c], seg[0])
         return data
 

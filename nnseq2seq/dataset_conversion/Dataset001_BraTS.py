@@ -28,22 +28,6 @@ def make_out_dirs(dataset_id: int, task_name="BraTS"):
     return out_dir, out_train_dir, out_labels_dir, out_test_dir
 
 
-def create_BraTS_split(labelsTr_folder: str, seed: int = 1234) -> List[dict[str, List]]:
-    # labelsTr_folder = '/home/isensee/drives/gpu_data_root/OE0441/isensee/nnSeq2Seq_raw/nnSeq2Seq_raw_remake/Dataset001_BraTS/labelsTr'
-    nii_files = nifti_files(labelsTr_folder, join=False)
-    patients = np.unique([i[:len('patient000')] for i in nii_files])
-    rs = np.random.RandomState(seed)
-    rs.shuffle(patients)
-    splits = []
-    for fold in range(5):
-        val_patients = patients[fold::5]
-        train_patients = [i for i in patients if i not in val_patients]
-        val_cases = [i[:-7] for i in nii_files for j in val_patients if i.startswith(j)]
-        train_cases = [i[:-7] for i in nii_files for j in train_patients if i.startswith(j)]
-        splits.append({'train': train_cases, 'val': val_cases})
-    return splits
-
-
 def copy_files(src_data_train_folder: Path, src_data_test_folder: Path, train_dir: Path, labels_dir: Path, test_dir: Path):
     """Copy files from the BraTS dataset to the nnSeq2Seq dataset folder. Returns the number of training cases."""
     patients_train = sorted([f for f in (src_data_train_folder).iterdir() if f.is_dir()])
@@ -123,12 +107,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print("Converting...")
     convert_brats(args.input_train_folder, args.input_test_folder, args.dataset_id, args.version_id)
-
-    dataset_name = f"Dataset{args.dataset_id:03d}_{'BraTS'}"
-    labelsTr = join(nnSeq2Seq_raw, dataset_name, 'labelsTr')
-    preprocessed_folder = join(nnSeq2Seq_preprocessed, dataset_name)
-    maybe_mkdir_p(preprocessed_folder)
-    split = create_BraTS_split(labelsTr)
-    save_json(split, join(preprocessed_folder, 'splits_final.json'), sort_keys=False)
 
     print("Done!")

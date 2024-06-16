@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nnseq2seq.networks.seq2seq.model3d.convnext import Block, LayerNorm, ResBlock, hyperResBlock
+from nnseq2seq.networks.seq2seq.model3d.convnext import Block, LayerNorm, ResBlock, hyperResBlock, hyperAttnResBlock
 
 
 class HyperImageDecoder(nn.Module):
@@ -38,25 +38,28 @@ class HyperImageDecoder(nn.Module):
                 self.midconv_layers.append(nn.Sequential(
                     nn.Conv3d(c_pre+ce, out_channels=ce, kernel_size=1, padding=0, stride=1),
                 ))
-            self.midres_layers.append(hyperResBlock(ce, self.style_dim, nr, self.hyper_dim, kr, pr, layer_scale_init_value=self.layer_scale_init_value))
+            self.midres_layers.append(
+                #hyperResBlock(ce, self.style_dim, nr, self.hyper_dim, kr, pr, layer_scale_init_value=self.layer_scale_init_value)
+                hyperAttnResBlock(ce, self.style_dim, nr, self.hyper_dim, kr, pr, layer_scale_init_value=self.layer_scale_init_value, use_attn=True)
+                )
             self.up_layers.append(nn.Sequential(
                     #nn.ConvTranspose3d(ce, out_channels=ce, kernel_size=ke, padding=se//2, stride=se),
                     nn.Upsample(scale_factor=se, mode='trilinear', align_corners=True),
                 ))
             self.deep_layers.append(nn.Sequential(
-                nn.Conv3d(ce, out_channels=self.c_out, kernel_size=7, padding=3, stride=1, padding_mode='reflect'),
+                nn.Conv3d(ce, out_channels=self.c_out, kernel_size=3, padding=1, stride=1, padding_mode='zeros'),
                 nn.LeakyReLU(0.01, inplace=True),
             ))
             c_pre = ce
         
         self.up_out = nn.Sequential(
-            ResBlock(c_pre, n_layer=1, kernel_size=7, padding=3, layer_scale_init_value=self.layer_scale_init_value),
+            ResBlock(c_pre, n_layer=1, kernel_size=3, padding=1, layer_scale_init_value=self.layer_scale_init_value),
             #nn.ConvTranspose3d(c_pre, out_channels=c_pre//2, kernel_size=4, padding=1, stride=2),
             nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True),
-            nn.Conv3d(c_pre, out_channels=c_pre//2, kernel_size=3, padding=1, stride=1, padding_mode='reflect'),
+            nn.Conv3d(c_pre, out_channels=c_pre//2, kernel_size=3, padding=1, stride=1, padding_mode='zeros'),
             LayerNorm(c_pre//2, eps=1e-6, data_format="channels_first"),
             nn.LeakyReLU(0.01, inplace=True),
-            nn.Conv3d(c_pre//2, out_channels=self.c_out, kernel_size=7, padding=3, stride=1, padding_mode='reflect'),
+            nn.Conv3d(c_pre//2, out_channels=self.c_out, kernel_size=3, padding=1, stride=1, padding_mode='zeros'),
             nn.LeakyReLU(0.01, inplace=True),
         )
             

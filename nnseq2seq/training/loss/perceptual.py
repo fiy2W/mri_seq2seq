@@ -198,8 +198,9 @@ class AdaptivePerceptualLoss(nn.Module):
             loss = loss * mask
         loss_id = 0
         loss = loss.mean()
-        self.W_init[loss_id] = self.W_init[loss_id] + self.alpha * (loss.item() - self.W_init[loss_id])
-        losses.append(loss/self.W_init[loss_id]*self.scale)
+        if not torch.isnan(loss):
+            self.W_init[loss_id] = self.W_init[loss_id] + self.alpha * (loss.item() - self.W_init[loss_id])
+        losses.append(loss/(abs(self.W_init[loss_id])+1e-5)*self.scale)
         for id_layer, layer in enumerate(self.vgg):
 
             features_input = layer(features_input)
@@ -215,9 +216,10 @@ class AdaptivePerceptualLoss(nn.Module):
                     loss = loss * cur_mask
 
                 loss = loss.mean()
-                self.W_init[loss_id] = self.W_init[loss_id] + self.alpha * (loss.item() - self.W_init[loss_id])
-                losses.append(loss/self.W_init[loss_id]*self.scale)
-
+                if not torch.isnan(loss):
+                    self.W_init[loss_id] = self.W_init[loss_id] + self.alpha * (loss.item() - self.W_init[loss_id])
+                losses.append(loss/(abs(self.W_init[loss_id])+1e-5)*self.scale)
+        
         return losses
 
     def forward(self, input, target, mask=None):

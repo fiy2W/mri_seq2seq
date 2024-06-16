@@ -51,7 +51,7 @@ class L1_SSIM_and_Perceptual_loss(nn.Module):
                     self.perceptual(net_output[:,:,:,:,h], target[:,:,:,:,h], mask[:,:,:,:,h]))/3
             result += self.weight_perceptual * per_loss
         return result
-    
+
 
 class DC_and_CE_loss(nn.Module):
     def __init__(self, soft_dice_kwargs, ce_kwargs, weight_ce=1, weight_dice=1, ignore_label=None,
@@ -76,7 +76,7 @@ class DC_and_CE_loss(nn.Module):
         self.ce = RobustCrossEntropyLoss(**ce_kwargs)
         self.dc = dice_class(apply_nonlin=softmax_helper_dim1, **soft_dice_kwargs)
 
-    def forward(self, net_output: torch.Tensor, target: torch.Tensor):
+    def forward(self, net_output: torch.Tensor, target: torch.Tensor, weights: torch.Tensor):
         """
         target must be b, c, x, y(, z) with c=1
         :param net_output:
@@ -95,12 +95,19 @@ class DC_and_CE_loss(nn.Module):
             target_dice = target
             mask = None
 
-        dc_loss = self.dc(net_output, target_dice, loss_mask=mask) \
-            if self.weight_dice != 0 else 0
         ce_loss = self.ce(net_output, target[:, 0]) \
             if self.weight_ce != 0 and (self.ignore_label is None or num_fg > 0) else 0
-
-        result = self.weight_ce * ce_loss + self.weight_dice * dc_loss
+        if len(target.shape)==4:
+            dc_loss = self.dc(net_output*weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1),
+                            target_dice*weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1), loss_mask=mask) \
+                if self.weight_dice != 0 else 0
+            result = self.weight_ce * torch.mean(torch.mean(ce_loss, dim=(1,2))*weights) + self.weight_dice * dc_loss
+        else:
+            dc_loss = self.dc(net_output*weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1),
+                            target_dice*weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1), loss_mask=mask) \
+                if self.weight_dice != 0 else 0
+            result = self.weight_ce * torch.mean(torch.mean(ce_loss, dim=(1,2,3))*weights) + self.weight_dice * dc_loss
+        
         return result
 
 
@@ -140,7 +147,7 @@ class DC_and_BCE_loss(nn.Module):
 
         dc_loss = self.dc(net_output, target_regions, loss_mask=mask)
         if mask is not None:
-            ce_loss = (self.ce(net_output, target_regions) * mask).sum() / torch.clip(mask.sum(), min=1e-8)
+            ce_loss = (self.ce(net_output, target_regions) * mask).sum() / torch.clip(mask.sum(), min=1)
         else:
             ce_loss = self.ce(net_output, target_regions)
         result = self.weight_ce * ce_loss + self.weight_dice * dc_loss

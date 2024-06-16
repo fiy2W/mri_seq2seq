@@ -102,7 +102,7 @@ class Rescale0_995to01Normalization(ImageNormalization):
 
     def run(self, image: np.ndarray, seg: np.ndarray = None) -> np.ndarray:
         image = image.astype(self.target_dtype, copy=False)
-        lower_bound = 0
+        lower_bound = np.percentile(image, 0.5)
         upper_bound = max(np.percentile(image, 99.5), 1e-8)
         image = (np.clip(image, a_min=lower_bound, a_max=None) - lower_bound) / (upper_bound - lower_bound)
         return image
@@ -118,4 +118,13 @@ class CT005_995to01Normalization(ImageNormalization):
 
         image = image.astype(self.target_dtype, copy=False)
         image = (np.clip(image, a_min=lower_bound, a_max=None) - lower_bound) / (upper_bound - lower_bound)
+        return image
+
+
+class CannyNormalization(ImageNormalization):
+    leaves_pixels_outside_mask_at_zero_if_use_mask_for_norm_is_true = False
+
+    def run(self, image: np.ndarray, seg: np.ndarray = None) -> np.ndarray:
+        assert self.intensityproperties is not None, "CannyNormalization requires intensity properties"
+        image = np.clip(np.array(image, dtype=np.float32), a_min=0, a_max=1)
         return image

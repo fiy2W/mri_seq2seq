@@ -14,7 +14,7 @@ The values in `channel_names` determine the normalization scheme used for a give
 
 Here is a list of available normalization schemes:
 - `CT`: Perform CT normalization. Specifically, collect intensity values from the foreground classes (all but the background and ignore) from all training cases and compute the 0.5 ($l$) and 99.5 ($h$) percentile of the values. Then normalize by $(max(X, l)-l)/(h-l)$. The normalization applied is the same for each training case (for this input channel). The values used by nnSeq2Seq for normalization are stored in the foreground_intensity_properties_per_channel entry in the corresponding plans file. This normalization suits modalities presenting physical quantities, such as CT images and ADC maps.
-- `rescale_to_0_995`/anything else: Compute 99.5 ($h$) percentile of the intensity values for each image, then normalize by $max(X, 0)/h$.
+- `rescale_to_0_995`/anything else: Compute 0.5 ($l$) and 99.5 ($h$) percentile of the intensity values for each image, then normalize by $(max(X, l)-l)/(h-l)$.
 
 ## How to implement custom normalization strategies?
 An example of adding your normalization strategies `MyNormalization` for the channel_name `MySequence`.

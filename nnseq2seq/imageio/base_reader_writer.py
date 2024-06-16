@@ -71,7 +71,7 @@ class BaseReaderWriter(ABC):
         pass
 
     @abstractmethod
-    def write_seg(self, seg: np.ndarray, output_fname: str, properties: dict) -> None:
+    def write_seg(self, seg: np.ndarray, output_fname: str, properties: dict, with_head: bool) -> None:
         """
         Export the predicted segmentation to the desired file format. The given seg array will have the same shape and
         orientation as the corresponding image data, so you don't need to do any resampling or whatever. Just save :-)

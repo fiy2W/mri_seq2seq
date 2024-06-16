@@ -100,6 +100,12 @@ class SSIMLoss(nn.Module):
         conv = getattr(F, f"conv{self.spatial_dims}d")
         w = self.w.to(device=x.device, dtype=x.dtype)
 
+        minsize = min(x.shape[2:])
+        if minsize<self.win_size:
+            pad = getattr(nn, f"ZeroPad{self.spatial_dims}d")(self.win_size-minsize)
+            x = pad(x)
+            y = pad(y)
+
         c1 = (self.k1 * data_range) ** 2  # stability constant for luminance
         c2 = (self.k2 * data_range) ** 2  # stability constant for contrast
         ux = conv(x, w)  # mu_x
@@ -113,6 +119,6 @@ class SSIMLoss(nn.Module):
 
         numerator = (2 * ux * uy + c1) * (2 * vxy + c2)
         denom = (ux**2 + uy**2 + c1) * (vx + vy + c2)
-        ssim_value = numerator / denom
+        ssim_value = numerator / (denom+1e-5)
         loss: torch.Tensor = 1 - ssim_value.mean()
         return loss

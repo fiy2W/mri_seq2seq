@@ -158,7 +158,7 @@ class NibabelIOWithReorient(BaseReaderWriter):
     def read_seg(self, seg_fname: str) -> Tuple[np.ndarray, dict]:
         return self.read_images((seg_fname, ))
 
-    def write_seg(self, seg: np.ndarray, output_fname: str, properties: dict) -> None:
+    def write_seg(self, seg: np.ndarray, output_fname: str, properties: dict, with_head: bool=True) -> None:
         # revert transpose
         seg = seg.transpose((2, 1, 0)).astype(np.uint8)
 

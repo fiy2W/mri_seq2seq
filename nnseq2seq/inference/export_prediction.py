@@ -17,7 +17,8 @@ def convert_predicted_logits_to_segmentation_with_correct_shape(predicted_logits
                                                                 label_manager: LabelManager,
                                                                 properties_dict: dict,
                                                                 return_probabilities: bool = False,
-                                                                num_threads_torch: int = 8):
+                                                                num_threads_torch: int = 8,
+                                                                latent_space: bool = False):
     old_threads = torch.get_num_threads()
     torch.set_num_threads(num_threads_torch)
 
@@ -26,37 +27,48 @@ def convert_predicted_logits_to_segmentation_with_correct_shape(predicted_logits
         len(configuration_manager.spacing) == \
         len(properties_dict['shape_after_cropping_and_before_resampling']) else \
         [properties_dict['spacing'][0], *configuration_manager.spacing]
-    predicted_logits = configuration_manager.resampling_fn_probabilities(predicted_logits,
-                                            properties_dict['shape_after_cropping_and_before_resampling'],
-                                            current_spacing,
-                                            properties_dict['spacing'])
-    # return value of resampling_fn_probabilities can be ndarray or Tensor but that does not matter because
-    # apply_inference_nonlin will convert to torch
-    #predicted_probabilities = label_manager.apply_inference_nonlin(predicted_logits)
-    #del predicted_logits
-    #segmentation = label_manager.convert_probabilities_to_segmentation(predicted_probabilities)
-    segmentation = np.clip(predicted_logits, a_min=0, a_max=None)
+    if not latent_space:
+        predicted_logits = configuration_manager.resampling_fn_probabilities(predicted_logits,
+                                                properties_dict['shape_after_cropping_and_before_resampling'],
+                                                current_spacing,
+                                                properties_dict['spacing'])
+        # return value of resampling_fn_probabilities can be ndarray or Tensor but that does not matter because
+        # apply_inference_nonlin will convert to torch
+        #predicted_probabilities = label_manager.apply_inference_nonlin(predicted_logits)
+        #del predicted_logits
+        #segmentation = label_manager.convert_probabilities_to_segmentation(predicted_probabilities)
+        segmentation = np.clip(predicted_logits, a_min=0, a_max=None)
+    else:
+        segmentation = predicted_logits
 
     # segmentation may be torch.Tensor but we continue with numpy
     if isinstance(segmentation, torch.Tensor):
         segmentation = segmentation.cpu().numpy()
 
-    # put segmentation in bbox (revert cropping)
-    segmentation_reverted_cropping = np.zeros(properties_dict['shape_before_cropping'])
-    slicer = bounding_box_to_slice(properties_dict['bbox_used_for_cropping'])
-    segmentation_reverted_cropping[slicer] = segmentation
-    del segmentation
+    if not latent_space:
+        # put segmentation in bbox (revert cropping)
+        segmentation_reverted_cropping = np.zeros(properties_dict['shape_before_cropping'])
+        slicer = bounding_box_to_slice(properties_dict['bbox_used_for_cropping'])
+        segmentation_reverted_cropping[slicer] = segmentation
+        del segmentation
 
-    # revert transpose
-    segmentation_reverted_cropping = segmentation_reverted_cropping.transpose(plans_manager.transpose_backward)
+        # revert transpose
+        segmentation_reverted_cropping = segmentation_reverted_cropping.transpose(plans_manager.transpose_backward)
+    else:
+        segmentation_reverted_cropping = segmentation
+
     if return_probabilities:
-        # revert cropping
-        predicted_probabilities = np.clip(predicted_logits, a_min=0, a_max=None)
-        predicted_probabilities = label_manager.revert_cropping_on_probabilities(predicted_probabilities,
-                                                                                 properties_dict[
-                                                                                     'bbox_used_for_cropping'],
-                                                                                 properties_dict[
-                                                                                     'shape_before_cropping'])
+        if not latent_space:
+            # revert cropping
+            predicted_probabilities = np.clip(predicted_logits, a_min=0, a_max=None)
+            predicted_probabilities = label_manager.revert_cropping_on_probabilities(predicted_probabilities,
+                                                                                    properties_dict[
+                                                                                        'bbox_used_for_cropping'],
+                                                                                    properties_dict[
+                                                                                        'shape_before_cropping'])
+        else:
+            predicted_probabilities = predicted_logits
+
         predicted_probabilities = predicted_probabilities.cpu().numpy()
         # revert transpose
         predicted_probabilities = predicted_probabilities.transpose([0] + [i + 1 for i in
@@ -72,7 +84,9 @@ def export_prediction_from_logits(predicted_array_or_file: Union[np.ndarray, tor
                                   configuration_manager: ConfigurationManager,
                                   plans_manager: PlansManager,
                                   dataset_json_dict_or_file: Union[dict, str], output_file_truncated: str,
-                                  save_probabilities: bool = False):
+                                  save_probabilities: bool = False,
+                                  latent_space: bool = False,
+                                  ):
     # if isinstance(predicted_array_or_file, str):
     #     tmp = deepcopy(predicted_array_or_file)
     #     if predicted_array_or_file.endswith('.npy'):
@@ -87,7 +101,7 @@ def export_prediction_from_logits(predicted_array_or_file: Union[np.ndarray, tor
     label_manager = plans_manager.get_label_manager(dataset_json_dict_or_file)
     ret = convert_predicted_logits_to_segmentation_with_correct_shape(
         predicted_array_or_file, plans_manager, configuration_manager, label_manager, properties_dict,
-        return_probabilities=save_probabilities
+        return_probabilities=save_probabilities, latent_space=latent_space
     )
     del predicted_array_or_file
 
@@ -103,7 +117,7 @@ def export_prediction_from_logits(predicted_array_or_file: Union[np.ndarray, tor
 
     rw = plans_manager.image_reader_writer_class()
     rw.write_seg(segmentation_final, output_file_truncated + dataset_json_dict_or_file['file_ending'],
-                 properties_dict)
+                 properties_dict, with_head=not latent_space)
 
 
 def resample_and_save(predicted: Union[torch.Tensor, np.ndarray], target_shape: List[int], output_file: str,

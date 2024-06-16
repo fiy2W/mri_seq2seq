@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nnseq2seq.networks.seq2seq.model3d.convnext import Block, LayerNorm, ResBlock, hyperResBlock
+from nnseq2seq.networks.seq2seq.model3d.convnext import Block, LayerNorm, ResBlock, AttnResBlock, hyperResBlock
+from nnseq2seq.networks.seq2seq.model3d.quantize import VectorQuantizer2 as VectorQuantizer
 
 
 class ImageEncoder(nn.Module):
@@ -18,6 +19,8 @@ class ImageEncoder(nn.Module):
         self.p_res = args['resblock_padding']
         self.layer_scale_init_value = args['layer_scale_init_value']
         self.latent_space_dim = args['latent_space_dim']
+        self.vq_beta = args['vq_beta']
+        self.vq_n_embed = args['vq_n_embed']
 
         self.down_layers = nn.ModuleList()
         self.up_layers = nn.ModuleList()
@@ -38,7 +41,7 @@ class ImageEncoder(nn.Module):
                     nn.Conv3d(in_channels=c_pre, out_channels=ce, kernel_size=se, padding=0, stride=se),
                 ]
                 up_scale = up_scale * se
-            block.extend([Block(dim=ce, kernel_size=kr, padding=pr, layer_scale_init_value=self.layer_scale_init_value) for _ in range(nr)])
+            block.append(AttnResBlock(dim=ce, n_layer=nr, kernel_size=kr, padding=pr, layer_scale_init_value=self.layer_scale_init_value, use_attn=True))
             self.down_layers.append(nn.Sequential(*block))
             c_pre = ce
 
@@ -54,6 +57,11 @@ class ImageEncoder(nn.Module):
                     nn.Upsample(scale_factor=up_scale, mode='nearest'),
                 ))
         self.conv_latent = nn.Conv3d(in_channels=up_channel*len(self.c_enc), out_channels=self.latent_space_dim, kernel_size=1, padding=0, stride=1)
+        self.quantize = VectorQuantizer(self.vq_n_embed, self.latent_space_dim, beta=self.vq_beta)
+        self.p = nn.Conv3d(
+            args['latent_space_dim'],
+            args['latent_space_dim']*2*2*2,
+            kernel_size=2, stride=2, padding=0)
 
     def forward(self, x):
         features = []
@@ -63,4 +71,5 @@ class ImageEncoder(nn.Module):
             features.append(f)
         features = torch.cat(features, dim=1)
         z = self.conv_latent(features)
-        return z
+        zq, vq_loss, _ = self.quantize(z)
+        return zq, vq_loss

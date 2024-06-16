@@ -52,8 +52,8 @@ class ExperimentPlanner(object):
         self.UNet_class_3d = Seq2Seq3d
         # the following two numbers are really arbitrary and were set to reproduce nnSeq2Seq v1's configurations as
         # much as possible
-        self.UNet_reference_val_3d = 290000000  #560000000  # 455600128  550000000
-        self.UNet_reference_val_2d = 52000000  #85000000  # 83252480
+        self.UNet_reference_val_3d = 500000000  #560000000  # 455600128  550000000
+        self.UNet_reference_val_2d = 70000000  #85000000  # 83252480
         #self.UNet_reference_com_nfeatures = 32
         self.UNet_reference_val_corresp_GB = 8
         self.UNet_reference_val_corresp_bs_2d = 12
@@ -61,7 +61,7 @@ class ExperimentPlanner(object):
         self.UNet_featuremap_min_edge_length = 4
         #self.UNet_blocks_per_stage_encoder = (2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2)
         #self.UNet_blocks_per_stage_decoder = (2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2)
-        self.UNet_min_batch_size = 2
+        self.UNet_min_batch_size = 1
         self.UNet_max_features_2d = 512
         self.UNet_max_features_3d = 320
         self.max_dataset_covered = 0.05 # we limit the batch size so that no more than 5% of the dataset can be seen
@@ -289,10 +289,12 @@ class ExperimentPlanner(object):
                     'conv_kernel': [4, 2, 2],
                     'conv_stride': [4, 2, 2],
                     'resblock_n': [3, 3, 3],
-                    'resblock_kernel': [7, 7, 7],
-                    'resblock_padding': [3, 3, 3],
+                    'resblock_kernel': [3, 3, 3],
+                    'resblock_padding': [1, 1, 1],
                     'layer_scale_init_value': 0.000001,
                     'latent_space_dim': 3,
+                    'vq_n_embed': 8192,
+                    'vq_beta': 0.25,
                 },
                 'image_decoder': {
                     'out_channels': 1,
@@ -301,13 +303,25 @@ class ExperimentPlanner(object):
                     'conv_stride': [2, 2, 2],
                     'conv_down': [4, 2, 1],
                     'resblock_n': [3, 3, 3],
-                    'resblock_kernel': [7, 7, 7],
-                    'resblock_padding': [3, 3, 3],
+                    'resblock_kernel': [3, 3, 3],
+                    'resblock_padding': [1, 1, 1],
                     'layer_scale_init_value': 0.000001,
-                    'hyper_conv_dim': num_input_channels if num_input_channels<16 else 16,
+                    'hyper_conv_dim': 16,
                     'latent_space_dim': 3,
                     'style_dim': num_input_channels,
                     'deep_supervision': True,
+                },
+                'segmentor': {
+                    'latent_space_dim': 3,
+                    'num_classes': len(self.dataset_json['labels'].keys()),
+                    'upsample_scale': 4,
+                },
+                'discriminator': {
+                    'in_channels': 1,
+                    'conv_channels': [96, 192, 384, 384],
+                    'layer_scale_init_value': 0.000001,
+                    'hyper_conv_dim': 16,
+                    'style_dim': num_input_channels,
                 },
                 #'n_stages': num_stages,
                 #'features_per_stage': _features_per_stage(num_stages, max_num_features),
@@ -348,7 +362,7 @@ class ExperimentPlanner(object):
         ref_bs = self.UNet_reference_val_corresp_bs_2d if len(spacing) == 2 else self.UNet_reference_val_corresp_bs_3d
         # we enforce a batch size of at least two, reference values may have been computed for different batch sizes.
         # Correct for that in the while loop if statement
-        while (estimate / ref_bs * 2) > reference:
+        while (estimate / ref_bs) > reference:
             # print(patch_size, estimate, reference)
             # patch size seems to be too large, so we need to reduce it. Reduce the axis that currently violates the
             # aspect ratio the most (that is the largest relative to median shape)

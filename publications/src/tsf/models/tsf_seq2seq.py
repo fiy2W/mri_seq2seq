@@ -34,7 +34,7 @@ class TSF_seq2seq(nn.Module):
 
         self.fc_p = nn.Sequential(
             nn.Linear(self.style_dim, self.seq_in),
-            nn.Sigmoid()
+            nn.Softmax(dim=1)
         )
         
         self.pads = nn.ModuleList()

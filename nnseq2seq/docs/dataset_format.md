@@ -10,9 +10,9 @@ Images are multiple sequences or modalities for the same case, and they **MUST**
 Image files must therefore follow the following naming convention: `{CASE_IDENTIFIER}_{XXXX}.{FILE_ENDING}`.
 Hereby, `XXXX` is the 4-digit modality/channel identifier (it should be unique for each modality/channel, e.g., "0000" for T1, "0001" for T1Gd, "0002" for T2, "0003" for Flair, …), and `FILE_ENDING` is the file extension used by your image format (.nii.gz, ...). See below for concrete examples. The dataset.json file connects channel names with the channel identifiers in the 'channel_names' key (see below for details).
 
-Segmentation is not necessary for us. However, since nnSeq2Seq will oversample the segmentation foreground, this helps the model pay more attention to the lesion area. Segmentations must share the same geometry with their corresponding images. Segmentations are integer maps, with each value representing a semantic class. The background must be 0. If there is no background, do not use the label 0 for something else! Integer values of your semantic classes must be consecutive (1, 2, 3, ...). Of course, not all labels have to be present in each training case. Segmentations are saved as `{CASE_IDENTIFER}.{FILE_ENDING}`. **Let all pixels be 0 in the segmentation if you do not have any annotations.**
+Segmentation is not necessary for us if only synthesising missing sequence. However, since nnSeq2Seq will oversample the segmentation foreground, this helps the model pay more attention to the lesion area. Segmentations must share the same geometry with their corresponding images. Segmentations are integer maps, with each value representing a semantic class. The background must be 0. If there is no background, do not use the label 0 for something else! Integer values of your semantic classes must be consecutive (1, 2, 3, ...). Of course, not all labels have to be present in each training case. Segmentations are saved as `{CASE_IDENTIFER}.{FILE_ENDING}`. **Let all pixels be 0 in the segmentation if you do not have any annotations.**
 
-**Note: Missing sequences or modalities are allowed in cases.** We did not use adversarial learning because it would lead to unstable training parameters and results. Therefore, nnSeq2Seq does not currently support completely unpaired training data.
+**Note: Missing sequences or modalities are allowed in cases.**
 
 ## Supported file formats
 nnSeq2Seq requires the same file format for images and segmentations!
@@ -115,7 +115,8 @@ Here is what the `dataset.json` should look like in the example of the `Dataset0
         "NCR": 1,
         "ED": 2,
         "unknown": 3,
-        "ET": 4
+        "ET": 4,
+        # "foreground": 5,
     },
     "numChannel": 4,  # Declare the total number of sequences or modalities
     "numTraining": 1251,
@@ -123,5 +124,7 @@ Here is what the `dataset.json` should look like in the example of the `Dataset0
 }
 ```
 We added `numChannel` to declare the total number of sequences or modalities.
+
+**Note: Cases with `"foreground"` in the `"label"` are ignored when calculating the segmentation loss during training.** This is primarily used when there are cases of missing segmentation labels in the dataset.
 
 The `channel_names` determine the normalization used by nnSeq2Seq. If a channel is marked as `CT`, then a global normalization based on the intensities in the foreground pixels will be used. If it is something else, a per-channel percentile will be used. See [here](intensity_normalization.md) for more information about custom intensity normalization.

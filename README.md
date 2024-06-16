@@ -9,13 +9,21 @@ Seq2Seq is a series of dynamic multi-domain models that can translate an arbitra
 Referring to [nnU-Net](https://github.com/MIC-DKFZ/nnUNet), we propose nnSeq2Seq, a tool for adaptively training Seq2Seq models with a given dataset. It will analyze the provided training cases and automatically configure a matching synthesis pipeline. No expertise is required on your end! You can easily train the models and use them for your application.
 
 ### What functions does nnSeq2Seq have?
-- One image $\rightarrow$ one image
+- Input one/multiple images $\rightarrow$ output one image
   - [x] Missing sequence/modality synthesis
-  - [x] Imaging differentiation map generation
-- Multiple images $\rightarrow$ one image
-  - [ ] Missing sequence/modality synthesis
-- Metrics calculation
-  - [ ] Sequence contribution
+    - Input: [CT] $\rightarrow$ Output: [PET]
+    - Input: [T1, T2, DWI, ADC] $\rightarrow$ Output: [DCE]
+  - [x] Segmentation
+    - Input: [DCE] $\rightarrow$ Output: [Tumor]
+    - Input: [T1, T1Gd, T2, FLAIR] $\rightarrow$ Output: [Tumor]
+  - [x] vector quantized common (VQC)-latent space compression
+    - Input: [CT] $\rightarrow$ Output: [VQC]
+    - Input: [T1, T2] $\rightarrow$ Output: [VQC, VQC]
+- Explainability and visualization
+  - [x] Synthesis-based sequence contribution
+  - [x] Imaging differentiation map
+  - [x] Task-specific sequence contribution
+  - [x] Task-specific enhanced map
 
 ### How to get started?
 Read these:
