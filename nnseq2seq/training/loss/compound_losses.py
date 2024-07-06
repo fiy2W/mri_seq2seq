@@ -76,7 +76,7 @@ class DC_and_CE_loss(nn.Module):
         self.ce = RobustCrossEntropyLoss(**ce_kwargs)
         self.dc = dice_class(apply_nonlin=softmax_helper_dim1, **soft_dice_kwargs)
 
-    def forward(self, net_output: torch.Tensor, target: torch.Tensor, weights: torch.Tensor):
+    def forward(self, deep: int, net_output: torch.Tensor, target: torch.Tensor, weights: torch.Tensor):
         """
         target must be b, c, x, y(, z) with c=1
         :param net_output:

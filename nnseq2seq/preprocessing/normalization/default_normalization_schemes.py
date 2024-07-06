@@ -3,6 +3,7 @@ from typing import Type
 
 import numpy as np
 from numpy import number
+import scipy.stats
 
 
 class ImageNormalization(ABC):
@@ -103,7 +104,7 @@ class Rescale0_995to01Normalization(ImageNormalization):
     def run(self, image: np.ndarray, seg: np.ndarray = None) -> np.ndarray:
         image = image.astype(self.target_dtype, copy=False)
         lower_bound = np.percentile(image, 0.5)
-        upper_bound = max(np.percentile(image, 99.5), 1e-8)
+        upper_bound = max(np.percentile(image, 99.5), 1e-8) * 1.25
         image = (np.clip(image, a_min=lower_bound, a_max=None) - lower_bound) / (upper_bound - lower_bound)
         return image
 
@@ -127,4 +128,30 @@ class CannyNormalization(ImageNormalization):
     def run(self, image: np.ndarray, seg: np.ndarray = None) -> np.ndarray:
         assert self.intensityproperties is not None, "CannyNormalization requires intensity properties"
         image = np.clip(np.array(image, dtype=np.float32), a_min=0, a_max=1)
+        return image
+
+
+class precontrast_995to01Normalization(ImageNormalization):
+    leaves_pixels_outside_mask_at_zero_if_use_mask_for_norm_is_true = False
+
+    def run(self, image: np.ndarray, seg: np.ndarray = None) -> np.ndarray:
+        image = image.astype(self.target_dtype, copy=False)
+        lower_bound = np.percentile(image, 0.5)
+        upper_bound = max(np.percentile(image, 99.5), 1e-8) * 1.25 * 1.5
+        image = (np.clip(image, a_min=lower_bound, a_max=None) - lower_bound) / (upper_bound - lower_bound)
+        return image
+
+
+class washin_995to01Normalization(ImageNormalization):
+    leaves_pixels_outside_mask_at_zero_if_use_mask_for_norm_is_true = False
+
+    def run(self, image: np.ndarray, seg: np.ndarray = None) -> np.ndarray:
+        image = image.astype(self.target_dtype, copy=False)
+        lower_bound = np.percentile(image, 0.5)
+        upper_bound = max(np.percentile(image, 99.5), 1e-8)
+
+        window = (upper_bound - lower_bound) * 1.25
+        level = 0#scipy.stats.mode(image[:,:10,:].reshape((-1)))[0][0]
+        
+        image = (np.clip(image, level-window/2, a_max=None) - (level-window/2)) / window
         return image

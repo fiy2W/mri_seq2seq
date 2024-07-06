@@ -29,7 +29,10 @@ class hyperConv(nn.Module):
         self.stride = stride
         self.bias = bias
         self.weight_dim = weight_dim
-        self.fc = nn.Linear(style_dim, weight_dim)
+        self.fc = nn.Sequential(
+            nn.Linear(style_dim, weight_dim*4),
+            nn.Linear(weight_dim*4, weight_dim)
+        )
         self.kshape = [dim_out, dim_in//groups, ksize, ksize] if self.ndims==2 else [dim_out, dim_in//groups, ksize, ksize, ksize]
         self.padding = (ksize-1)//2 if padding is None else padding
         self.groups = groups
@@ -40,7 +43,10 @@ class hyperConv(nn.Module):
         nn.init.kaiming_normal_(self.param, a=0, mode='fan_in')
         
         if self.bias is True:
-            self.fc_bias = nn.Linear(style_dim, weight_dim)
+            self.fc_bias = nn.Sequential(
+                nn.Linear(style_dim, weight_dim*4),
+                nn.Linear(weight_dim*4, weight_dim)
+            )
             self.b = nn.Parameter(torch.randn(self.dim_out, weight_dim).type(torch.float32))
             nn.init.constant_(self.b, 0.0)
 

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class GANLoss(nn.Module):
@@ -28,7 +29,7 @@ class GANLoss(nn.Module):
             self.loss = nn.MSELoss()
         elif gan_mode == 'vanilla':
             self.loss = nn.BCEWithLogitsLoss()
-        elif gan_mode in ['wgangp']:
+        elif gan_mode in ['wgangp', 'hinge']:
             self.loss = None
         else:
             raise NotImplementedError('gan mode %s not implemented' % gan_mode)
@@ -68,4 +69,9 @@ class GANLoss(nn.Module):
                 loss = -prediction.mean()
             else:
                 loss = prediction.mean()
+        elif self.gan_mode == 'hinge':
+            if target_is_real:
+                loss = torch.mean(F.relu(1. - prediction))
+            else:
+                loss = torch.mean(F.relu(1. + prediction))
         return loss

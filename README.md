@@ -18,12 +18,11 @@ Referring to [nnU-Net](https://github.com/MIC-DKFZ/nnUNet), we propose nnSeq2Seq
     - Input: [T1, T1Gd, T2, FLAIR] $\rightarrow$ Output: [Tumor]
   - [x] vector quantized common (VQC)-latent space compression
     - Input: [CT] $\rightarrow$ Output: [VQC]
-    - Input: [T1, T2] $\rightarrow$ Output: [VQC, VQC]
+    - Input: [T1, T2] $\rightarrow$ Output: [VQC]
 - Explainability and visualization
-  - [x] Synthesis-based sequence contribution
   - [x] Imaging differentiation map
+  - [x] Synthesis-based sequence contribution
   - [x] Task-specific sequence contribution
-  - [x] Task-specific enhanced map
 
 ### How to get started?
 Read these:

@@ -7,17 +7,13 @@ from timm.models.layers import trunc_normal_
 
 from nnseq2seq.networks.seq2seq.model2d.encoder import ImageEncoder as ImageEncoder2d
 from nnseq2seq.networks.seq2seq.model2d.decoder import HyperImageDecoder as HyperImageDecoder2d
-from nnseq2seq.networks.seq2seq.model2d.tsf import TSF_attention as TSF_attention2d
 from nnseq2seq.networks.seq2seq.model2d.segmentor import Segmentor as Segmentor2d
 from nnseq2seq.networks.seq2seq.model2d.discriminator import NLayerDiscriminator as NLayerDiscriminator2d
 
 from nnseq2seq.networks.seq2seq.model3d.encoder import ImageEncoder as ImageEncoder3d
 from nnseq2seq.networks.seq2seq.model3d.decoder import HyperImageDecoder as HyperImageDecoder3d
-from nnseq2seq.networks.seq2seq.model3d.tsf import TSF_attention as TSF_attention3d
 from nnseq2seq.networks.seq2seq.model3d.segmentor import Segmentor as Segmentor3d
 from nnseq2seq.networks.seq2seq.model3d.discriminator import NLayerDiscriminator as NLayerDiscriminator3d
-
-from nnseq2seq.training.loss.contrastive_loss import SupConLoss
 
 
 class Seq2Seq2d(nn.Module):
@@ -26,19 +22,24 @@ class Seq2Seq2d(nn.Module):
         
         self.image_encoder = ImageEncoder2d(args['image_encoder'])
         self.hyper_decoder = HyperImageDecoder2d(args['image_decoder'])
-        self.tsf = TSF_attention2d(args['image_decoder'])
         self.segmentor = Segmentor2d(args['segmentor'])
         self.discriminator = NLayerDiscriminator2d(args['discriminator'])
 
         self.init()
     
-    def forward(self, x_src, domain_tgt, with_latent=False):
-        z, vq_loss = self.image_encoder(x_src)
-        outputs = self.hyper_decoder(z, domain_tgt)
+    def forward(self, x_src, domain_src_all, domain_src_subgroup, domain_tgt, with_latent=False):
+        z_all, z_subgroup, vq_loss = self.image_encoder(x_src, domain_src_all, domain_src_subgroup)
+        outputs_all = self.hyper_decoder(z_all, domain_tgt)
+        outputs_subgroup = self.hyper_decoder(z_subgroup, domain_tgt)
         if with_latent:
-            return outputs, z, vq_loss
+            return outputs_all, outputs_subgroup, z_all, z_subgroup, vq_loss
         else:
-            return outputs
+            return outputs_all, outputs_subgroup
+    
+    def infer(self, x_src, domain_src_all, domain_src_subgroup, domain_tgt):
+        z_all, z_subgroup, _ = self.image_encoder(x_src, domain_src_all, domain_src_subgroup)
+        outputs_subgroup = self.hyper_decoder(z_subgroup, domain_tgt)
+        return outputs_subgroup, z_all
     
     def init(self):
         for m in self.modules():
@@ -47,23 +48,8 @@ class Seq2Seq2d(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
     
-    def reparameterization(self, zqs):
-        zqs = torch.stack(zqs, dim=1)
-        zq_mean = torch.mean(zqs, dim=1, keepdim=True)
-        zq_std = torch.mean(torch.square(zqs-zq_mean), dim=1, keepdim=True) / (zqs.shape[1] - 1) * zqs.shape[1]
-        zq_rand = torch.randn_like(zq_mean) * zq_std + zq_mean
-        return zq_rand[:,0]
-    
     def compute_conv_feature_map_size(self, input_size):
-        output = self.compute_single_size(input_size) * 3
-
-        # discriminator
-        for c in self.discriminator.c_enc:
-            input_size = [insize/2 for insize in input_size]
-            output += (np.prod([c, *input_size], dtype=np.int64)*2)
-        output += (np.prod([c, *input_size], dtype=np.int64)*(2+5*2) + \
-            (np.prod([*input_size, *input_size], dtype=np.int64) + np.prod([c, *input_size], dtype=np.int64)*5) + \
-            np.prod([1, *input_size], dtype=np.int64))
+        output = self.compute_single_size(input_size)
         
         # perceptual
         for s, c, n in zip(
@@ -78,66 +64,37 @@ class Seq2Seq2d(nn.Module):
     def compute_single_size(self, input_size):
         output = np.prod(input_size, dtype=np.int64)
 
+        num_input_channels = self.image_encoder.style_dim
         strides = self.image_encoder.s_enc
         channels = self.image_encoder.c_enc
         nres = self.image_encoder.n_res
         zdim = self.image_encoder.latent_space_dim
+        up_scale = 1
         for i, (s, c, n) in enumerate(zip(strides, channels, nres)):
-            if i==0:
-                n = n + 2
+            up_scale = up_scale*s
             input_size = [insize/s for insize in input_size]
             feature_map_layer = np.prod([c, *input_size], dtype=np.int64)
-            attention_map = np.prod([*input_size, *input_size], dtype=np.int64)
-            if i==0:
-                z_size = input_size
-                feature_map_layer_z = feature_map_layer
-            output += (feature_map_layer*(2+5*n)+(attention_map+feature_map_layer*5)*np.max([0, n-1]))
-        output += (feature_map_layer_z*(len(strides)-1))
-        output += np.prod([zdim, *z_size], dtype=np.int64)
+            output += (feature_map_layer*(1+5*n))
+            if up_scale>=4:
+                attention_map = np.prod([*input_size, *input_size], dtype=np.int64)
+                output += (attention_map + 5*feature_map_layer)
+            output += np.prod([zdim, *input_size], dtype=np.int64)*(1+1)
+        output = output * num_input_channels
 
-        down = self.hyper_decoder.d_enc
+        rep = 6 # 2 dec + 2 seg + 2 dec
         strides = self.hyper_decoder.s_enc
         channels = self.hyper_decoder.c_enc
         nres = self.hyper_decoder.n_res
-        for i, (d, s, c, n) in enumerate(zip(down, strides, channels, nres)):
-            d_size = [zs/d for zs in z_size]
-            u_size = [ds*s for ds in d_size]
-            output += (np.prod([c, *d_size], dtype=np.int64)*(2+5*n) + \
-                (np.prod([*d_size, *d_size], dtype=np.int64) + np.prod([c, *d_size], dtype=np.int64)*5)*np.max([0, n-1]) + \
-                np.prod([c, *u_size], dtype=np.int64) + \
-                np.prod(u_size, dtype=np.int64))
-        output += (np.prod([c, *u_size], dtype=np.int64)*5)
-        u_size = [us*2 for us in u_size]
-        output += (np.prod([c+c/2+c/2+1, *u_size], dtype=np.int64))
+        for i, (s, c, n) in enumerate(zip(strides, channels, nres)):
+            input_size = [insize/s for insize in input_size]
+            feature_map_layer = np.prod([c, *input_size], dtype=np.int64)
+            output += (feature_map_layer*(1+5*n) + np.prod(input_size, dtype=np.int64))*rep
+            if up_scale>=4:
+                attention_map = np.prod([*input_size, *input_size], dtype=np.int64)
+                output += (attention_map + 5*feature_map_layer)*rep
+            up_scale = up_scale//s
+
         return output
-    
-    def contrastive_loss(self, z1, z2, mask):
-        contrastive = SupConLoss()
-
-        b = z1.shape[0]
-
-        z1 = z1 * mask
-        z2 = z2 * mask
-        
-        p_z1 = torch.flatten(self.image_encoder.p(z1), 2, 3).permute(0,2,1) # b, wh, c
-        p_z2 = torch.flatten(self.image_encoder.p(z2), 2, 3).permute(0,2,1) # b, wh, c
-
-        p_z1 = p_z1 / p_z1.norm(dim=2, keepdim=True)
-        p_z2 = p_z2 / p_z2.norm(dim=2, keepdim=True)
-
-        A = torch.sum(torch.softmax(torch.bmm(p_z1, p_z1.permute(0,2,1)), dim=1), dim=2)
-        
-        loss_contrast = 0
-        for bi in range(b):
-            _, index = torch.sort(A[bi])
-            index = index[:index.shape[0]//4]
-            sp_z1 = p_z1[bi][index]
-            sp_z2 = p_z2[bi][index]
-
-            loss_contrast += contrastive(torch.stack([sp_z1, sp_z2], dim=1))
-            loss_contrast += contrastive(torch.stack([sp_z2, sp_z1], dim=1))
-        loss_contrast = loss_contrast/b
-        return loss_contrast
 
 
 class Seq2Seq3d(nn.Module):
@@ -146,19 +103,24 @@ class Seq2Seq3d(nn.Module):
         
         self.image_encoder = ImageEncoder3d(args['image_encoder'])
         self.hyper_decoder = HyperImageDecoder3d(args['image_decoder'])
-        self.tsf = TSF_attention3d(args['image_decoder'])
         self.segmentor = Segmentor3d(args['segmentor'])
         self.discriminator = NLayerDiscriminator3d(args['discriminator'])
         
         self.init()
     
-    def forward(self, x_src, domain_tgt, with_latent=False):
-        z, vq_loss = self.image_encoder(x_src)
-        outputs = self.hyper_decoder(z, domain_tgt)
+    def forward(self, x_src, domain_src_all, domain_src_subgroup, domain_tgt, with_latent=False):
+        z_all, z_subgroup, vq_loss = self.image_encoder(x_src, domain_src_all, domain_src_subgroup)
+        outputs_all = self.hyper_decoder(z_all, domain_tgt)
+        outputs_subgroup = self.hyper_decoder(z_subgroup, domain_tgt)
         if with_latent:
-            return outputs, z, vq_loss
+            return outputs_all, outputs_subgroup, z_all, z_subgroup, vq_loss
         else:
-            return outputs
+            return outputs_all, outputs_subgroup
+    
+    def infer(self, x_src, domain_src_all, domain_src_subgroup, domain_tgt):
+        z_all, z_subgroup, _ = self.image_encoder(x_src, domain_src_all, domain_src_subgroup)
+        outputs_subgroup = self.hyper_decoder(z_subgroup, domain_tgt)
+        return outputs_subgroup, z_all
     
     def init(self):
         for m in self.modules():
@@ -167,23 +129,8 @@ class Seq2Seq3d(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
     
-    def reparameterization(self, zqs):
-        zqs = torch.stack(zqs, dim=1)
-        zq_mean = torch.mean(zqs, dim=1, keepdim=True)
-        zq_std = torch.mean(torch.square(zqs-zq_mean), dim=1, keepdim=True) / (zqs.shape[1] - 1) * zqs.shape[1]
-        zq_rand = torch.randn_like(zq_mean) * zq_std + zq_mean
-        return zq_rand[:,0]
-    
     def compute_conv_feature_map_size(self, input_size):
-        output = self.compute_single_size(input_size) * 3
-
-        # discriminator
-        for c in self.discriminator.c_enc:
-            input_size = [insize/2 for insize in input_size]
-            output += (np.prod([c, *input_size], dtype=np.int64)*2)
-        output += (np.prod([c, *input_size], dtype=np.int64)*(2+5*2) + \
-            (np.prod([*input_size, *input_size], dtype=np.int64) + np.prod([c, *input_size], dtype=np.int64)*5) + \
-            np.prod([1, *input_size], dtype=np.int64))
+        output = self.compute_single_size(input_size)
         
         # perceptual
         for input_size in [
@@ -203,63 +150,34 @@ class Seq2Seq3d(nn.Module):
     def compute_single_size(self, input_size):
         output = np.prod(input_size, dtype=np.int64)
 
+        num_input_channels = self.image_encoder.style_dim
         strides = self.image_encoder.s_enc
         channels = self.image_encoder.c_enc
         nres = self.image_encoder.n_res
         zdim = self.image_encoder.latent_space_dim
+        up_scale = 1
         for i, (s, c, n) in enumerate(zip(strides, channels, nres)):
-            if i==0:
-                n = n + 2
+            up_scale = up_scale*s
             input_size = [insize/s for insize in input_size]
             feature_map_layer = np.prod([c, *input_size], dtype=np.int64)
-            attention_map = np.prod([*input_size, *input_size], dtype=np.int64)
-            if i==0:
-                z_size = input_size
-                feature_map_layer_z = feature_map_layer
-            output += (feature_map_layer*(2+5*n)+(attention_map+feature_map_layer*5)*np.max([0, n-1]))
-        output += (feature_map_layer_z*(len(strides)-1))
-        output += np.prod([zdim, *z_size], dtype=np.int64)
+            output += (feature_map_layer*(1+5*n))
+            if up_scale>=4:
+                attention_map = np.prod([*input_size, *input_size], dtype=np.int64)
+                output += (attention_map + 5*feature_map_layer)
+            output += np.prod([zdim, *input_size], dtype=np.int64)*(1+1)
+        output = output * num_input_channels
 
-        down = self.hyper_decoder.d_enc
+        rep = 6 # 2 dec + 2 seg + 2 dec
         strides = self.hyper_decoder.s_enc
         channels = self.hyper_decoder.c_enc
         nres = self.hyper_decoder.n_res
-        for i, (d, s, c, n) in enumerate(zip(down, strides, channels, nres)):
-            d_size = [zs/d for zs in z_size]
-            u_size = [ds*s for ds in d_size]
-            output += (np.prod([c, *d_size], dtype=np.int64)*(2+5*n) + \
-                (np.prod([*d_size, *d_size], dtype=np.int64) + np.prod([c, *d_size], dtype=np.int64)*5)*np.max([0, n-1]) + \
-                np.prod([c, *u_size], dtype=np.int64) + \
-                np.prod(u_size, dtype=np.int64))
-        output += (np.prod([c, *u_size], dtype=np.int64)*3)
-        u_size = [us*2 for us in u_size]
-        output += (np.prod([c+c/2+c/2+1, *u_size], dtype=np.int64))
+        for i, (s, c, n) in enumerate(zip(strides, channels, nres)):
+            input_size = [insize/s for insize in input_size]
+            feature_map_layer = np.prod([c, *input_size], dtype=np.int64)
+            output += (feature_map_layer*(1+5*n) + np.prod(input_size, dtype=np.int64))*rep
+            if up_scale>=4:
+                attention_map = np.prod([*input_size, *input_size], dtype=np.int64)
+                output += (attention_map + 5*feature_map_layer)*rep
+            up_scale = up_scale//s
+
         return output
-    
-    def contrastive_loss(self, z1, z2, mask):
-        contrastive = SupConLoss()
-
-        b = z1.shape[0]
-
-        z1 = z1 * mask
-        z2 = z2 * mask
-        
-        p_z1 = torch.flatten(self.image_encoder.p(z1), 2, 4).permute(0,2,1)
-        p_z2 = torch.flatten(self.image_encoder.p(z2), 2, 4).permute(0,2,1)
-        
-        p_z1 = p_z1 / p_z1.norm(dim=2, keepdim=True)
-        p_z2 = p_z2 / p_z2.norm(dim=2, keepdim=True)
-
-        A = torch.sum(torch.softmax(torch.bmm(p_z1, p_z1.permute(0,2,1)), dim=1), dim=2)
-        
-        loss_contrast = 0
-        for bi in range(b):
-            _, index = torch.sort(A[bi])
-            index = index[:index.shape[0]//8]
-            sp_z1 = p_z1[bi][index]
-            sp_z2 = p_z2[bi][index]
-
-            loss_contrast += contrastive(torch.stack([sp_z1, sp_z2], dim=1))
-            loss_contrast += contrastive(torch.stack([sp_z2, sp_z1], dim=1))
-        loss_contrast = loss_contrast/b
-        return loss_contrast

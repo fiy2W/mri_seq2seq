@@ -2,7 +2,8 @@ from typing import Type
 
 from nnseq2seq.preprocessing.normalization.default_normalization_schemes import CTNormalization, NoNormalization, \
     ZScoreNormalization, RescaleTo01Normalization, RGBTo01Normalization, ImageNormalization, \
-    Rescale0_995to01Normalization, CT005_995to01Normalization, CannyNormalization
+    Rescale0_995to01Normalization, CT005_995to01Normalization, CannyNormalization, \
+    precontrast_995to01Normalization, washin_995to01Normalization
 
 channel_name_to_normalization_mapping = {
     #'CT': CTNormalization,
@@ -14,6 +15,8 @@ channel_name_to_normalization_mapping = {
     'CT': CT005_995to01Normalization,
     'anchor_CT': CT005_995to01Normalization,
     'Canny': CannyNormalization,
+    'fat_saturated_DCE_pre_contrast': precontrast_995to01Normalization,
+    'washin': washin_995to01Normalization,
 }
 
 

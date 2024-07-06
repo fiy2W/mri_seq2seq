@@ -150,9 +150,8 @@ class nnSeq2SeqTrainer(object):
         self.oversample_foreground_percent = 0.33
         self.num_iterations_per_epoch = 250
         self.num_val_iterations_per_epoch = 50
-        self.num_epochs = 1500
-        self.num_epochs_for_pretrain = 500
-        self.num_epochs_for_tsf = 1000
+        self.num_epochs = 2000
+        self.num_epochs_for_pretrain = 1000
         self.current_epoch = 0
         self.enable_deep_supervision = True
 
@@ -168,8 +167,9 @@ class nnSeq2SeqTrainer(object):
         self.grad_scaler = GradScaler() if self.device.type == 'cuda' else None
         self.loss = None  # -> self.initialize
         self.seg_loss = None
-        self.gan = GANLoss('lsgan').to(device=self.device)
+        self.gan = GANLoss('hinge').to(device=self.device)
         self.img_dis = None
+        self.tgt_seq_pool = None
 
         ### Simple logging. Don't take that away from me!
         # initialize log file. This is just our log for the print statements etc. Not to be confused with lightning
@@ -236,10 +236,7 @@ class nnSeq2SeqTrainer(object):
                 self.network = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.network)
                 self.network = DDP(self.network, device_ids=[self.local_rank])
 
-            self.loss = self._build_loss()
-            self.seg_loss = DC_and_CE_loss({'batch_dice': self.configuration_manager.batch_dice,
-                                            'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp}, {'reduction': 'none'}, weight_ce=1, weight_dice=1,
-                                            ignore_label=self.label_manager.ignore_label, dice_class=MemoryEfficientSoftDiceLoss)
+            self.loss, self.seg_loss = self._build_loss()
             self.was_initialized = True
         else:
             raise RuntimeError("You have called self.initialize even though the trainer was already initialized. "
@@ -323,7 +320,7 @@ class nnSeq2SeqTrainer(object):
             #deep_supervision_scales = list(list(i) for i in 1 / np.cumprod(np.vstack(
             #    self.configuration_manager.pool_op_kernel_sizes), axis=0))[:-1]
             deep_supervision_scales = [1/2**i for i, _ in enumerate(
-                [2]+self.configuration_manager.network_arch_init_kwargs['image_decoder']['conv_kernel'])]
+                self.configuration_manager.network_arch_init_kwargs['image_decoder']['conv_kernel'])]
         else:
             deep_supervision_scales = None  # for train and val_transforms
         return deep_supervision_scales
@@ -389,18 +386,21 @@ class nnSeq2SeqTrainer(object):
         spatial_dims = 2 if self.configuration_name=='2d' else 3
         if spatial_dims==2:
             weight_perceptual = 0.1
-            scale_factor = 2
+            scale_factor = 1
         else:
             weight_perceptual = 0.1
-            scale_factor = 2
+            scale_factor = 1
         loss = L1_SSIM_and_Perceptual_loss(self.device, weight_l1=10, weight_ssim=1, weight_perceptual=weight_perceptual, spatial_dims=spatial_dims)
+        loss_seg = DC_and_CE_loss({'batch_dice': self.configuration_manager.batch_dice,
+                                            'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp}, {'reduction': 'none'}, weight_ce=1, weight_dice=1,
+                                            ignore_label=self.label_manager.ignore_label, dice_class=MemoryEfficientSoftDiceLoss)
 
         # we give each output a weight which decreases exponentially (division by 2) as the resolution decreases
         # this gives higher resolution outputs more weight in the loss
 
         if self.enable_deep_supervision:
             deep_supervision_scales = self._get_deep_supervision_scales()
-            weights = np.array([1 / (scale_factor ** i) for i in range(len(deep_supervision_scales))])
+            weights = np.array([(scale_factor ** i) for i in range(len(deep_supervision_scales))])
             #if self.is_ddp and not self._do_i_compile():
                 # very strange and stupid interaction. DDP crashes and complains about unused parameters due to
                 # weights[-1] = 0. Interestingly this crash doesn't happen with torch.compile enabled. Strange stuff.
@@ -413,7 +413,8 @@ class nnSeq2SeqTrainer(object):
             weights = weights / weights.sum()
             # now wrap the loss
             loss = DeepSupervisionWrapper(loss, weights)
-        return loss
+            loss_seg = DeepSupervisionWrapper(loss_seg, weights)
+        return loss, loss_seg
 
     def configure_rotation_dummyDA_mirroring_and_inital_patch_size(self):
         """
@@ -515,7 +516,6 @@ class nnSeq2SeqTrainer(object):
         optimizer = torch.optim.AdamW(
             list(self.network.image_encoder.parameters()) + \
             list(self.network.hyper_decoder.parameters()) + \
-            list(self.network.tsf.parameters()) + \
             list(self.network.segmentor.parameters()), lr=self.initial_lr,
             betas=(0.9, 0.95), weight_decay=self.weight_decay)
         optimizer_d = torch.optim.AdamW(
@@ -934,45 +934,37 @@ class nnSeq2SeqTrainer(object):
         # lrs are the same for all workers so we don't need to gather them in case of DDP training
         self.logger.log('lrs', self.optimizer.param_groups[0]['lr'], self.current_epoch)
 
-    def random_select_seq_code(self, properties, select_anchor=None):
+    def random_select_seq_code(self, properties):
         output_code = []
         for bid in range(len(properties)):
-            anchor_set = [i for i in range(self.num_input_channels) if i in properties[bid]['anchor_domain']]
-            other_set = [i for i in range(self.num_input_channels) if i not in properties[bid]['anchor_domain']]
-            if select_anchor==True and len(anchor_set)>0:
-                seq_id = random.choice(anchor_set)
-            elif select_anchor==False and len(other_set)>0:
-                seq_id = random.choice(other_set)
-            else:
-                seq_id = random.choice([i for i in range(self.num_input_channels)])
+            seq_id = random.choice([i for i in range(self.num_input_channels)])
             output_code.append(seq_id)
         output_code = torch.from_numpy(np.array(output_code)).to(dtype=torch.int64)
         return output_code
 
-    def random_select_available_seq(self, data, properties, select_anchor=None):
+    def random_select_available_seq(self, data, properties):
         output_data = []
         output_code = []
         other_code = []
         output_mask = []
         for bid in range(len(properties)):
-            anchor_set = [i for i in properties[bid]['available_channel'] if i in properties[bid]['anchor_domain']]
-            other_set = [i for i in properties[bid]['available_channel'] if i not in properties[bid]['anchor_domain']]
-            if select_anchor==True and len(anchor_set)>0:
-                seq_id = random.choice(anchor_set)
-            elif select_anchor==False and len(other_set)>0:
-                seq_id = random.choice(other_set)
-            else:
-                seq_id = random.choice(properties[bid]['available_channel'])
+            if self.tgt_seq_pool is None:
+                self.tgt_seq_pool = [0 for i in range(self.num_input_channels)]
+            inner_list = [v if i in properties[bid]['available_channel'] else 1e+9 for i, v in enumerate(self.tgt_seq_pool)]
+            #seq_id = random.choice(properties[bid]['available_channel'])
+            seq_id = np.int64(inner_list.index(min(inner_list)))
             output_data.append(data[bid:bid+1, seq_id:seq_id+1])
             output_code.append(seq_id)
+            self.tgt_seq_pool[seq_id] += 1
             other_code.append(random.choice([i for i in range(self.num_input_channels) if i!=seq_id]))
             
-            fg = 1
-            bg = 1
-            for seq_id in properties[bid]['available_channel']:
-                if seq_id not in properties[bid]['anchor_domain']:
-                    fg *= (data[bid:bid+1, seq_id:seq_id+1]>0)
-                    bg *= (data[bid:bid+1, seq_id:seq_id+1]<=0)
+            # calculate overlap mask, but it's hard because some image do not have zero background
+            fg = torch.ones_like(data[0:1, 0:1])
+            bg = torch.ones_like(data[0:1, 0:1])
+            #for seq_id in properties[bid]['available_channel']:
+            #    if seq_id not in properties[bid]['anchor_domain']:
+            #        fg *= (data[bid:bid+1, seq_id:seq_id+1]>0)
+            #        bg *= (data[bid:bid+1, seq_id:seq_id+1]<=0)
             output_mask.append(fg+bg)
         output_data = torch.cat(output_data, dim=0)
         output_code = torch.from_numpy(np.array(output_code))
@@ -980,15 +972,18 @@ class nnSeq2SeqTrainer(object):
         output_mask = torch.cat(output_mask, dim=0)
         return output_data, output_code, other_code, output_mask
     
-    def random_select_available_multiseqs(self, properties):
+    def random_select_available_multiseqs(self, properties, tgt_id):
         output_code = []
+        output_code_all = []
         for bid in range(len(properties)):
             seqs_id = np.sort(random.sample(properties[bid]['available_channel'], random.choice(
-                [i for i in range(1, len(properties[bid]['available_channel'])+1)])))
-            output_code.append([1 if i in seqs_id else 0 for i in range(self.num_input_channels)])
+                [i for i in range(1, max(2, len(properties[bid]['available_channel'])))])))
+            output_code.append([1 if i in seqs_id and (i!=tgt_id[bid] or len(seqs_id)==1) else 0 for i in range(self.num_input_channels)])
+            output_code_all.append([1 if i in properties[bid]['available_channel'] else 0 for i in range(self.num_input_channels)])
             
         output_code = torch.from_numpy(np.array(output_code))
-        return output_code
+        output_code_all = torch.from_numpy(np.array(output_code_all))
+        return output_code_all, output_code
     
     def generate_seg_weights(self, properties):
         output_weight = []
@@ -1007,17 +1002,17 @@ class nnSeq2SeqTrainer(object):
         properties = batch['properties']
         seg_weights = self.generate_seg_weights(properties)
 
-        src_data, _, _, _ = self.random_select_available_seq(aug_data, properties, select_anchor=None)
-        int_data, _, _, _ = self.random_select_available_seq(ori_data, properties, select_anchor=True)
-        rand_code_int64 = self.random_select_seq_code(properties)
         tgt_data, tgt_code_int64, _, tgt_mask = self.random_select_available_seq(ori_data, properties)
+        src_all_code, src_code = self.random_select_available_multiseqs(properties, tgt_code_int64)
+        rand_code_int64 = self.random_select_seq_code(properties)
 
-        src_data = src_data.to(self.device, non_blocking=True)
-        int_data = int_data.to(self.device, non_blocking=True)
+        src_data = aug_data.to(self.device, non_blocking=True)
         tgt_data = tgt_data.to(self.device, non_blocking=True)
         tgt_mask = tgt_mask.to(self.device, dtype=tgt_data.dtype, non_blocking=True)
-        rand_code = F.one_hot(rand_code_int64, num_classes=self.num_input_channels).to(self.device, dtype=src_data.dtype, non_blocking=True)
+        src_all_code = src_all_code.to(self.device, dtype=tgt_data.dtype, non_blocking=True)
+        src_code = src_code.to(self.device, dtype=tgt_data.dtype, non_blocking=True)
         tgt_code = F.one_hot(tgt_code_int64, num_classes=self.num_input_channels).to(self.device, dtype=tgt_data.dtype, non_blocking=True)
+        rand_code = F.one_hot(rand_code_int64, num_classes=self.num_input_channels).to(self.device, dtype=src_data.dtype, non_blocking=True)
         
         if isinstance(target, list):
             target = [i.to(self.device, non_blocking=True) for i in target]
@@ -1026,7 +1021,7 @@ class nnSeq2SeqTrainer(object):
         seg_weights = seg_weights.to(self.device, dtype=src_data.dtype, non_blocking=True)
 
         if self.img_dis is None:
-            self.img_dis = torch.zeros([self.num_input_channels]+list(src_data.shape[1:])).to(self.device, non_blocking=True)
+            self.img_dis = torch.zeros([self.num_input_channels]+list(tgt_data.shape[1:])).to(self.device, non_blocking=True)
         img_rand_dis = []
         for rand_id in range(rand_code_int64.shape[0]):
             img_rand_dis.append(self.img_dis[rand_code_int64[rand_id]])
@@ -1036,73 +1031,45 @@ class nnSeq2SeqTrainer(object):
         if self.current_epoch>self.num_epochs_for_pretrain:
             self.optimizer_d.zero_grad(set_to_none=True)
             with torch.no_grad():
-                output_src2rand, _, _ = self.network(src_data, rand_code, with_latent=True)
-            pred_real = self.network.discriminator(img_rand_dis, rand_code)
-            pred_fake = self.network.discriminator(torch.clamp(output_src2rand[0].detach(), min=0), rand_code)
-            ld = self.gan(pred_real, True) + self.gan(pred_fake, False)
+                output_src2rand_all, output_src2rand_sub = self.network(src_data, src_all_code, src_code, rand_code, with_latent=False)
+            pred_real = self.network.discriminator(img_rand_dis)
+            pred_fake1 = self.network.discriminator(torch.clamp(output_src2rand_all[0].detach(), min=0))
+            pred_fake2 = self.network.discriminator(torch.clamp(output_src2rand_sub[0].detach(), min=0))
+            ld = self.gan(pred_real, True) + 0.5*self.gan(pred_fake1, False) + 0.5*self.gan(pred_fake2, False)
             ld.backward()
             torch.nn.utils.clip_grad_norm_(self.network.discriminator.parameters(), 12)
             self.optimizer_d.step()
 
         # adv
         self.optimizer.zero_grad(set_to_none=True)
-        if self.current_epoch>self.num_epochs_for_pretrain:
-            with torch.no_grad():
-                output_int2rand, latent_int, _ = self.network(int_data, rand_code, with_latent=True)
-                output_int2rand = [
-                    torch.clamp(output_int2rand[0], min=0).detach(),
-                    torch.clamp(F.interpolate(output_int2rand[0], scale_factor=0.5, mode='nearest'), min=0).detach(),
-                    torch.clamp(F.interpolate(output_int2rand[0], scale_factor=0.25, mode='nearest'), min=0).detach(),
-                    torch.clamp(F.interpolate(output_int2rand[0], scale_factor=0.125, mode='nearest'), min=0).detach(),
-                ]
-            latent_intrand, _ = self.network.image_encoder(output_int2rand[0])
-            mask_intrand = self.network.segmentor(latent_intrand)
-
+        
         #with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
-        output_src2tgt, latent_src, vq_loss_src = self.network(src_data, tgt_code, with_latent=True)
-        mask_src = self.network.segmentor(latent_src)
+        output_src2tgt_all, output_src2tgt_sub, latent_src_all, latent_src_sub, vq_loss_src = self.network(src_data, src_all_code, src_code, tgt_code, with_latent=True)
+        mask_src_all = self.network.segmentor(latent_src_all)
+        mask_src_sub = self.network.segmentor(latent_src_sub)
         
 
         # del data
         #int_datas = [F.interpolate(int_data, scale_factor=1/2**i, mode='nearest') for i in range(len(target))]
-        tgt_datas = [F.interpolate(tgt_data, scale_factor=1/2**i, mode='nearest') for i in range(len(target))]
+        tgt_datas = [F.interpolate(tgt_data, scale_factor=1/2**i, mode='bilinear' if len(tgt_data.shape)==4 else 'trilinear') for i in range(len(target))]
         tgt_masks = [F.interpolate(tgt_mask, scale_factor=1/2**i, mode='nearest') for i in range(len(target))]
-        l = self.loss(output_src2tgt, tgt_datas, tgt_masks) + \
+        l = 0.5*self.loss(output_src2tgt_all, tgt_datas, tgt_masks) + \
+            0.5*self.loss(output_src2tgt_sub, tgt_datas, tgt_masks) + \
             vq_loss_src + \
-            self.seg_loss(mask_src, target[0], seg_weights)
+            self.seg_loss(mask_src_all, target, [seg_weights for _ in target]) + \
+            self.seg_loss(mask_src_sub, target, [seg_weights for _ in target])
             
         
         if self.current_epoch>self.num_epochs_for_pretrain:
-            output_src2rand = self.network.hyper_decoder(latent_src, rand_code)
-            latent_srcrand, _ = self.network.image_encoder(torch.clamp(output_src2rand[0], min=0))
-            latent_reparam = self.network.reparameterization([latent_src.detach(), latent_int.detach(), latent_srcrand, latent_intrand])
-            output_rand2tgt = self.network.hyper_decoder(latent_reparam, tgt_code)
-            mask_srcrand = self.network.segmentor(latent_srcrand)
+            output_src2rand_all = self.network.hyper_decoder(latent_src_all, rand_code)
+            output_src2rand_sub = self.network.hyper_decoder(latent_src_sub, rand_code)
 
-            pred_fake = self.network.discriminator(torch.clamp(output_src2rand[0], min=0), rand_code)
-            l += (
-                self.loss(output_rand2tgt, tgt_datas, tgt_masks) + \
-                0.01*self.loss(output_src2rand, output_int2rand, tgt_masks) + \
-                self.seg_loss(mask_srcrand, target[0], seg_weights) + \
-                self.seg_loss(mask_intrand, target[0], seg_weights) + \
-                nn.MSELoss()(latent_src*tgt_masks[2], latent_int.detach()*tgt_masks[2]) + \
-                nn.MSELoss()(latent_srcrand*tgt_masks[2], latent_int.detach()*tgt_masks[2]) + \
-                nn.MSELoss()(latent_intrand*tgt_masks[2], latent_src.detach()*tgt_masks[2]) + \
-                self.network.contrastive_loss(latent_src, latent_int, tgt_masks[2]) + \
-                self.network.contrastive_loss(latent_src, latent_intrand, tgt_masks[2]) + \
-                self.network.contrastive_loss(latent_srcrand, latent_int, tgt_masks[2]) + \
-                2*self.gan(pred_fake, True))
+            pred_fake1 = self.network.discriminator(torch.clamp(output_src2rand_all[0], min=0))
+            pred_fake2 = self.network.discriminator(torch.clamp(output_src2rand_sub[0], min=0))
+            l += (self.gan(pred_fake1, True) + self.gan(pred_fake2, True))
         else:
-            output_int2rand = output_src2tgt
-            output_src2rand = output_src2tgt
-            output_rand2tgt = output_src2tgt
-            latent_src = latent_src
-            latent_srcrand = latent_src
-            latent_int = latent_src
-            latent_intrand = latent_src
-            latent_reparam = latent_src
-            mask_srcrand = mask_src
-            mask_intrand = mask_src
+            output_src2rand_all = output_src2tgt_all
+            output_src2rand_sub = output_src2tgt_sub
             
         if self.grad_scaler is not None:
             self.grad_scaler.scale(l).backward()
@@ -1121,56 +1088,6 @@ class nnSeq2SeqTrainer(object):
         
         for tgt_id in range(tgt_code_int64.shape[0]):
             self.img_dis[tgt_code_int64[rand_id]] = tgt_data[tgt_id]
-
-        # tsf
-        if self.current_epoch>self.num_epochs_for_tsf:
-            self.optimizer.zero_grad(set_to_none=True)
-
-            tsf_data = aug_data.view(-1,1,*aug_data.shape[2:]).to(self.device, non_blocking=True)
-            with torch.no_grad():
-                latent_tsf, _ = self.network.image_encoder(tsf_data)
-                latent_tsf = latent_tsf.reshape(aug_data.shape[0], -1, *latent_src.shape[2:])
-            
-            tsf_src_code = self.random_select_available_multiseqs(properties).to(self.device, non_blocking=True)
-            tsf_tgt_code = torch.cat([tsf_src_code, tgt_code, torch.zeros((tgt_code.shape[0],1), device=self.device)], dim=1)
-            tsf_seg_code = torch.cat([tsf_src_code, torch.zeros_like(tgt_code), torch.ones((tgt_code.shape[0],1), device=self.device)], dim=1)
-
-            latent_tsf_tgt, latent_tsf_tgt_finetune = self.network.tsf(latent_tsf, tsf_tgt_code)
-            latent_tsf_seg, latent_tsf_seg_finetune = self.network.tsf(latent_tsf, tsf_seg_code)
-            output_tsf_tgt = self.network.hyper_decoder(latent_tsf_tgt, tgt_code)
-            output_tsf_tgt_finetune = self.network.hyper_decoder(latent_tsf_tgt_finetune, tgt_code)
-            mask_tsf = self.network.segmentor(latent_tsf_seg)
-            mask_tsf_finetune = self.network.segmentor(latent_tsf_seg_finetune)
-
-            l_tsf = self.loss(output_tsf_tgt, tgt_datas, tgt_masks) + \
-                self.loss(output_tsf_tgt_finetune, tgt_datas, tgt_masks) + \
-                self.seg_loss(mask_tsf, target[0], seg_weights) + \
-                self.seg_loss(mask_tsf_finetune, target[0], seg_weights)
-            
-            if self.grad_scaler is not None:
-                self.grad_scaler.scale(l_tsf).backward()
-                self.grad_scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.network.tsf.parameters(), 12)
-                torch.nn.utils.clip_grad_norm_(self.network.hyper_decoder.parameters(), 12)
-                torch.nn.utils.clip_grad_norm_(self.network.segmentor.parameters(), 12)
-                self.grad_scaler.step(self.optimizer)
-                self.grad_scaler.update()
-            else:
-                l_tsf.backward()
-                torch.nn.utils.clip_grad_norm_(self.network.tsf.parameters(), 12)
-                torch.nn.utils.clip_grad_norm_(self.network.hyper_decoder.parameters(), 12)
-                torch.nn.utils.clip_grad_norm_(self.network.segmentor.parameters(), 12)
-                self.optimizer.step()
-        else:
-            latent_tsf_tgt = latent_src
-            latent_tsf_tgt_finetune = latent_src
-            latent_tsf_seg = latent_src
-            latent_tsf_seg_finetune = latent_src
-            output_tsf_tgt = output_src2tgt
-            output_tsf_tgt_finetune = output_src2tgt
-            mask_tsf = mask_src
-            mask_tsf_finetune = mask_src
-
             
 
         vis_path = os.path.join(self.output_folder, 'visualization')
@@ -1178,67 +1095,52 @@ class nnSeq2SeqTrainer(object):
         vis_save_path = os.path.join(vis_path, 'epoch_{}.jpg'.format(self.current_epoch))
         if not os.path.exists(vis_save_path):
             with torch.no_grad():
-                max_label = mask_srcrand.shape[1] - 1
-                mask_src = torch.argmax(mask_src, dim=1, keepdim=True)
-                mask_srcrand = torch.argmax(mask_srcrand, dim=1, keepdim=True)
-                mask_intrand = torch.argmax(mask_intrand, dim=1, keepdim=True)
-                mask_tsf = torch.argmax(mask_tsf, dim=1, keepdim=True)
-                mask_tsf_finetune = torch.argmax(mask_tsf_finetune, dim=1, keepdim=True)
+                max_label = mask_src_all[0].shape[1] - 1
+                mask_src_all = [torch.argmax(m, dim=1, keepdim=True)/max_label for m in mask_src_all]
+                mask_src_sub = [torch.argmax(m, dim=1, keepdim=True)/max_label for m in mask_src_sub]
                 if len(src_data.shape)==5:
                     sd = src_data.shape[2]//2
                     vimage = torch.stack([
-                        src_data[:,:,sd], output_src2tgt[0][:,:,sd], tgt_data[:,:,sd], tgt_mask[:,:,sd],
-                        src_data[:,:,sd], output_src2rand[0][:,:,sd], int_data[:,:,sd], output_int2rand[0][:,:,sd],
-                        output_rand2tgt[0][:,:,sd], tgt_data[:,:,sd],
-                        mask_src[:,:,sd]/max_label, target[0][:,:,sd]/max_label,
-                        mask_srcrand[:,:,sd]/max_label, target[0][:,:,sd]/max_label,
-                        mask_intrand[:,:,sd]/max_label, target[0][:,:,sd]/max_label,
-                        tgt_data[:,:,sd], output_tsf_tgt[0][:,:,sd], output_tsf_tgt_finetune[0][:,:,sd],
-                        torch.abs(output_tsf_tgt[0][:,:,sd]-output_tsf_tgt_finetune[0][:,:,sd]),
-                        target[0][:,:,sd]/max_label, mask_tsf[:,:,sd]/max_label, mask_tsf_finetune[:,:,sd]/max_label,
-                        torch.abs(mask_tsf[:,:,sd]/max_label-mask_tsf_finetune[:,:,sd]/max_label),
+                        tgt_data[:,:,sd], output_src2tgt_all[0][:,:,sd], output_src2tgt_sub[0][:,:,sd], torch.abs(output_src2tgt_all[0]-output_src2tgt_sub[0])[:,:,sd],
+                        img_rand_dis[:,:,sd], output_src2rand_all[0][:,:,sd], output_src2rand_sub[0][:,:,sd], torch.abs(output_src2rand_all[0]-output_src2rand_sub[0])[:,:,sd],
+                        target[0][:,:,sd]/max_label, mask_src_all[0][:,:,sd], mask_src_sub[0][:,:,sd], tgt_mask[:,:,sd],
+                        tgt_mask[:,:,sd], tgt_mask[:,:,sd], tgt_mask[:,:,sd], tgt_mask[:,:,sd],
                     ], dim=1).reshape(-1,1,*(src_data.shape[3:]))
                     vimage = torch.clamp(vimage, min=0, max=1)
                     torchvision.utils.save_image(vimage, vis_save_path)
                     torchvision.utils.save_image(self.img_dis[:,:,sd], os.path.join(vis_path, 'discriminator.jpg'))
-                    sd = latent_src.shape[2]//2
-                    vimage = torch.stack([
-                        latent_src[:,:,sd], latent_srcrand[:,:,sd], latent_intrand[:,:,sd], latent_int[:,:,sd],
-                        latent_reparam[:,:,sd], latent_tsf_tgt[:,:,sd], latent_tsf_tgt_finetune[:,:,sd], latent_tsf_seg_finetune[:,:,sd],
-                    ], dim=1).reshape(-1,latent_src.shape[1],*(latent_src.shape[3:]))
-                    torchvision.utils.save_image(vimage, os.path.join(vis_path, 'latent_space.jpg'))
-                    for vi, (oint, otgt, dint, dtgt) in enumerate(zip(output_src2tgt, output_rand2tgt, tgt_datas, tgt_datas)):
-                        sd = oint.shape[2]//2
+                    for vi, (lat_all, lat_sub) in enumerate(zip(latent_src_all, latent_src_sub)):
+                        sd = lat_all.shape[2]//2
                         vimage = torch.stack([
-                            oint[:,:,sd], dint[:,:,sd], otgt[:,:,sd], dtgt[:,:,sd],
-                        ], dim=1).reshape(-1,1,*(oint.shape[3:]))
+                            lat_all[:,:,sd], lat_sub[:,:,sd]
+                        ], dim=1).reshape(-1,lat_all.shape[1],*(lat_all.shape[3:]))
+                        torchvision.utils.save_image(vimage, os.path.join(vis_path, 'latent_space_{}.jpg'.format(vi)))
+                    for vi, (out_all, out_sub, out_tgt, m_all, m_sub, m_tgt) in enumerate(zip(output_src2tgt_all, output_src2tgt_sub, tgt_datas, mask_src_all, mask_src_sub, target)):
+                        sd = out_all.shape[2]//2
+                        vimage = torch.stack([
+                            out_all[:,:,sd], out_tgt[:,:,sd], out_sub[:,:,sd], out_tgt[:,:,sd], m_all[:,:,sd], m_tgt[:,:,sd]/max_label, m_sub[:,:,sd], m_tgt[:,:,sd]/max_label
+                        ], dim=1).reshape(-1,1,*(out_all.shape[3:]))
                         vimage = torch.clamp(vimage, min=0, max=1)
                         torchvision.utils.save_image(vimage, os.path.join(vis_path, 'deep_{}.jpg'.format(vi)))
                 else:
                     vimage = torch.stack([
-                        src_data, output_src2tgt[0], tgt_data, tgt_mask,
-                        src_data, output_src2rand[0], int_data, output_int2rand[0],
-                        output_rand2tgt[0], tgt_data,
-                        mask_src/max_label, target[0]/max_label,
-                        mask_srcrand/max_label, target[0]/max_label,
-                        mask_intrand/max_label, target[0]/max_label,
-                        tgt_data, output_tsf_tgt[0], output_tsf_tgt_finetune[0],
-                        torch.abs(output_tsf_tgt[0]-output_tsf_tgt_finetune[0]),
-                        target[0]/max_label, mask_tsf/max_label, mask_tsf_finetune/max_label,
-                        torch.abs(mask_tsf/max_label-mask_tsf_finetune/max_label),
+                        tgt_data, output_src2tgt_all[0], output_src2tgt_sub[0], torch.abs(output_src2tgt_all[0]-output_src2tgt_sub[0]),
+                        img_rand_dis, output_src2rand_all[0], output_src2rand_sub[0], torch.abs(output_src2rand_all[0]-output_src2rand_sub[0]),
+                        target[0]/max_label, mask_src_all[0], mask_src_sub[0], tgt_mask,
+                        tgt_mask, tgt_mask, tgt_mask, tgt_mask,
                     ], dim=1).reshape(-1,1,*(src_data.shape[2:]))
                     vimage = torch.clamp(vimage, min=0, max=1)
                     torchvision.utils.save_image(vimage, vis_save_path)
                     torchvision.utils.save_image(self.img_dis, os.path.join(vis_path, 'discriminator.jpg'))
-                    vimage = torch.stack([
-                        latent_src, latent_srcrand, latent_intrand, latent_int,
-                        latent_reparam, latent_tsf_tgt, latent_tsf_tgt_finetune, latent_tsf_seg_finetune,
-                    ], dim=1).reshape(-1,*(latent_src.shape[1:]))
-                    torchvision.utils.save_image(vimage, os.path.join(vis_path, 'latent_space.jpg'))
-                    for vi, (oint, otgt, dint, dtgt) in enumerate(zip(output_src2tgt, output_rand2tgt, tgt_datas, tgt_datas)):
+                    for vi, (lat_all, lat_sub) in enumerate(zip(latent_src_all, latent_src_sub)):
                         vimage = torch.stack([
-                            oint, dint, otgt, dtgt,
-                        ], dim=1).reshape(-1,1,*(oint.shape[2:]))
+                            lat_all, lat_sub
+                        ], dim=1).reshape(-1,*(lat_all.shape[1:]))
+                        torchvision.utils.save_image(vimage, os.path.join(vis_path, 'latent_space_{}.jpg'.format(vi)))
+                    for vi, (out_all, out_sub, out_tgt, m_all, m_sub, m_tgt) in enumerate(zip(output_src2tgt_all, output_src2tgt_sub, tgt_datas, mask_src_all, mask_src_sub, target)):
+                        vimage = torch.stack([
+                            out_all, out_tgt, out_sub, out_tgt, m_all, m_tgt/max_label, m_sub, m_tgt/max_label
+                        ], dim=1).reshape(-1,1,*(out_all.shape[2:]))
                         vimage = torch.clamp(vimage, min=0, max=1)
                         torchvision.utils.save_image(vimage, os.path.join(vis_path, 'deep_{}.jpg'.format(vi)))
         return {'loss': l.detach().cpu().numpy()}
@@ -1263,14 +1165,16 @@ class nnSeq2SeqTrainer(object):
         target = batch['target']
         properties = batch['properties']
 
-        src_data, src_code, _, _ = self.random_select_available_seq(data, properties)
-        tgt_data, tgt_code, _, tgt_mask = self.random_select_available_seq(data, properties)
-
-        src_data = src_data.to(self.device, non_blocking=True)
+        tgt_data, tgt_code_int64, _, tgt_mask = self.random_select_available_seq(data, properties)
+        src_all_code, src_code = self.random_select_available_multiseqs(properties, tgt_code_int64)
+        
+        src_data = data.to(self.device, non_blocking=True)
         tgt_data = tgt_data.to(self.device, non_blocking=True)
         tgt_mask = tgt_mask.to(self.device, dtype=tgt_data.dtype, non_blocking=True)
-        src_code = F.one_hot(src_code, num_classes=self.num_input_channels).to(self.device, dtype=src_data.dtype, non_blocking=True)
-        tgt_code = F.one_hot(tgt_code, num_classes=self.num_input_channels).to(self.device, dtype=tgt_data.dtype, non_blocking=True)
+        src_all_code = src_all_code.to(self.device, dtype=tgt_data.dtype, non_blocking=True)
+        src_code = src_code.to(self.device, dtype=tgt_data.dtype, non_blocking=True)
+        tgt_code = F.one_hot(tgt_code_int64, num_classes=self.num_input_channels).to(self.device, dtype=tgt_data.dtype, non_blocking=True)
+
         if isinstance(target, list):
             target = [i.to(self.device, non_blocking=True) for i in target]
         else:
@@ -1281,12 +1185,12 @@ class nnSeq2SeqTrainer(object):
         # If the device_type is 'mps' then it will complain that mps is not implemented, even if enabled=False is set. Whyyyyyyy. (this is why we don't make use of enabled=False)
         # So autocast will only be active if we have a cuda device.
         with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
-            output = self.network(src_data, tgt_code)
+            _, output = self.network(src_data, src_all_code, src_code, tgt_code)
             del data
             l = self.loss(
                 output,
-                [F.interpolate(tgt_data, scale_factor=1/2**i, mode='nearest') for i in range(len(target))],
-                [F.interpolate(tgt_mask, scale_factor=1/2**i, mode='nearest') for i in range(len(target))])
+                [F.interpolate(tgt_data, scale_factor=1/2**i, mode='bilinear' if len(tgt_data.shape)==4 else 'trilinear') for i in range(len(target))],
+                [F.interpolate(tgt_mask, scale_factor=1/2**i, mode='bilinear' if len(tgt_data.shape)==4 else 'trilinear') for i in range(len(target))])
 
         # we only need the output with the highest output resolution (if DS enabled)
         if self.enable_deep_supervision:

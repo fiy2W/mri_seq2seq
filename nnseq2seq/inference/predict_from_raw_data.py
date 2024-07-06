@@ -237,17 +237,9 @@ class nnSeq2SeqPredictor(object):
             save_json(self.dataset_json, join(output_folder, 'dataset.json'), sort_keys=False)
             save_json(self.plans_manager.plans, join(output_folder, 'plans.json'), sort_keys=False)
             # save task-specific contribution
-            self.one2one_translate_psnr = [[[] for _ in range(self.network.tsf.num_channel)] for _ in range(self.network.tsf.num_channel)]
-            ts_w = []
-            for tgt_id in range(self.network.tsf.num_channel):
-                tgt_code = torch.from_numpy(np.array([1 if i!=tgt_id else 0 for i in range(self.network.tsf.num_channel)] + [1 if i==tgt_id else 0 for i in range(self.network.tsf.num_channel)]+[0])).unsqueeze(0).to(dtype=torch.float32)
-                w1 = self.network.tsf.infer_contribution(tgt_code)
-                ts_w.append([tgt_id]+w1.squeeze().detach().numpy().tolist())
-            seg_code = torch.from_numpy(np.array([1 for i in range(self.network.tsf.num_channel)] + [0 for i in range(self.network.tsf.num_channel)]+[1])).unsqueeze(0).to(dtype=torch.float32)
-            w2 = self.network.tsf.infer_contribution(seg_code)
-            ts_w.append(['seg']+w2.squeeze().detach().numpy().tolist())
-            df = pd.DataFrame(data=ts_w, columns=['tgt']+['channel_{}'.format(i) for i in range(self.network.tsf.num_channel)])
-            df.to_csv(join(output_folder, 'task-specific_sequence_contribution.csv'))
+            self.one2one_translate_psnr = [[] for _ in range(self.network.image_encoder.style_dim)]
+            self.one2one_translate_ssim = [[] for _ in range(self.network.image_encoder.style_dim)]
+            self.tsf_weight = []
         #######################
 
         # check if we need a prediction from the previous stage
@@ -388,155 +380,181 @@ class nnSeq2SeqPredictor(object):
                     sleep(0.1)
                     proceed = not check_workers_alive_and_busy(export_pool, worker_list, r, allowed_num_queued=2)
                 
-                for tgt_seq in range(properties['num_channel']):
-                    tgt_code = F.one_hot(torch.from_numpy(np.array([tgt_seq], dtype=np.int64)),
-                        num_classes=properties['num_channel']).to(self.device, dtype=data.dtype, non_blocking=True)
-                    
-                    tsf_prediction, _, _ = self.predict_logits_from_preprocessed_data(data, tgt_code, properties=properties, with_attn=False)
-                    tsf_prediction_finetune, tsf_prediction_mask_finetune, _ = self.predict_logits_from_preprocessed_data(data, tgt_code, properties=properties, with_attn=True)
-                    tsf_prediction_mask_finetune = torch.argmax(tsf_prediction_mask_finetune, dim=0, keepdim=True).cpu()
-                    tsem = torch.abs(tsf_prediction_finetune-tsf_prediction)
-                    os.makedirs(os.path.join(ofile, 'multi2one_inference'), exist_ok=True)
-                    r.append(
-                        export_pool.starmap_async(
-                            export_prediction_from_logits,
-                            ((tsf_prediction_finetune, properties, self.configuration_manager, self.plans_manager,
-                            self.dataset_json, os.path.join(ofile, 'multi2one_inference', 'translate_tgt_{}'.format(tgt_seq)), save_probabilities),)
-                        )
+                # segment
+                tgt_code = F.one_hot(torch.from_numpy(np.array([0], dtype=np.int64)),
+                    num_classes=properties['num_channel']).to(self.device, dtype=data.dtype, non_blocking=True)
+                
+                _, prediction_mask, prediction_latent = self.predict_logits_from_preprocessed_data(data, tgt_code, properties=properties)
+                prediction_mask = torch.argmax(prediction_mask, dim=0, keepdim=True).cpu()
+                os.makedirs(os.path.join(ofile, 'multi2one_inference'), exist_ok=True)
+                r.append(
+                    export_pool.starmap_async(
+                        export_prediction_from_logits,
+                        ((prediction_mask, properties, self.configuration_manager, self.plans_manager,
+                        self.dataset_json, os.path.join(ofile, 'multi2one_inference', 'segmentation'), save_probabilities),)
                     )
-                    r.append(
-                        export_pool.starmap_async(
-                            export_prediction_from_logits,
-                            ((tsf_prediction_mask_finetune, properties, self.configuration_manager, self.plans_manager,
-                            self.dataset_json, os.path.join(ofile, 'multi2one_inference', 'segment'), save_probabilities),)
-                        )
-                    )
-                    os.makedirs(os.path.join(ofile, 'explainability_visualization/task-specific_enhanced_map'), exist_ok=True)
-                    r.append(
-                        export_pool.starmap_async(
-                            export_prediction_from_logits,
-                            ((tsem, properties, self.configuration_manager, self.plans_manager,
-                            self.dataset_json, os.path.join(ofile, 'explainability_visualization/task-specific_enhanced_map', 'task-specific_enhanced_map_tgt_{}'.format(tgt_seq)), save_probabilities),)
-                        )
-                    )
+                )
 
-                    md = torch.zeros_like(data[0:1])
+                if not self.segment_only:
+                    os.makedirs(os.path.join(ofile, 'latent_space'), exist_ok=True)
+                    r.append(
+                        export_pool.starmap_async(
+                            export_prediction_from_logits,
+                            ((prediction_latent, properties, self.configuration_manager, self.plans_manager,
+                            self.dataset_json, os.path.join(ofile, 'latent_space', 'latent_space'), save_probabilities, True),)
+                        )
+                    )
+                    os.makedirs(os.path.join(ofile, 'normalized_source_images'), exist_ok=True)
                     for src_idx, src_seq in enumerate(properties['available_channel']):
-                        prediction, prediction_mask, prediction_latent = self.predict_logits_from_preprocessed_data(data[src_idx:src_idx+1], tgt_code)
-                        prediction_mask = torch.argmax(prediction_mask, dim=0, keepdim=True).cpu()
-                        prediction_latent = F.interpolate(prediction_latent.to(dtype=torch.float32).unsqueeze(0), scale_factor=0.25)[0].cpu()
+                        r.append(
+                            export_pool.starmap_async(
+                                export_prediction_from_logits,
+                                ((data[src_idx:src_idx+1], properties, self.configuration_manager, self.plans_manager,
+                                self.dataset_json, os.path.join(ofile, 'normalized_source_images', 'norm_src_{}'.format(src_seq)), save_probabilities),)
+                            )
+                        )
 
+                    for tgt_seq in range(properties['num_channel']):
+                        tgt_code = F.one_hot(torch.from_numpy(np.array([tgt_seq], dtype=np.int64)),
+                            num_classes=properties['num_channel']).to(self.device, dtype=data.dtype, non_blocking=True)
+                        
+                        prediction, _, _ = self.predict_logits_from_preprocessed_data(data, tgt_code, properties=properties)
+                        r.append(
+                            export_pool.starmap_async(
+                                export_prediction_from_logits,
+                                ((prediction, properties, self.configuration_manager, self.plans_manager,
+                                self.dataset_json, os.path.join(ofile, 'multi2one_inference', 'translate_tgt_{}'.format(tgt_seq)), save_probabilities),)
+                            )
+                        )
                         if tgt_seq in properties['available_channel']:
                             tgt_idx = properties['available_channel'].index(tgt_seq)
                             hm_prediction = linearMatch(prediction, data[tgt_idx:tgt_idx+1])
-                            #hm_prediction = histMatch(prediction[0], data[tgt_idx], is_torch=True).unsqueeze(0)
-                            #hm_prediction = prediction
-                            md += torch.abs(hm_prediction-data[tgt_idx:tgt_idx+1])
+                            md = torch.abs(hm_prediction-data[tgt_idx:tgt_idx+1])
+
                             psnr = torch_PSNR(data[tgt_idx:tgt_idx+1], hm_prediction, data_range=1).item()
-                            self.one2one_translate_psnr[src_seq][tgt_seq].append(psnr)
+                            ssim = np_SSIM(data[tgt_idx].numpy(), hm_prediction[0].numpy(), data_range=1)
+                            self.one2one_translate_psnr[tgt_seq].append(psnr)
+                            self.one2one_translate_ssim[tgt_seq].append(ssim)
 
-                        if ofile is not None:
-                            # this needs to go into background processes
-                            # export_prediction_from_logits(prediction, properties, self.configuration_manager, self.plans_manager,
-                            #                               self.dataset_json, ofile, save_probabilities)
-                            print('sending off prediction to background worker for resampling and export')
-                            os.makedirs(os.path.join(ofile, 'normalized_source_images'), exist_ok=True)
-                            if tgt_seq==0:
-                                r.append(
-                                    export_pool.starmap_async(
-                                        export_prediction_from_logits,
-                                        ((data[src_idx:src_idx+1], properties, self.configuration_manager, self.plans_manager,
-                                        self.dataset_json, os.path.join(ofile, 'normalized_source_images', 'norm_src_{}'.format(src_seq)), save_probabilities),)
-                                    )
-                                )
-                            
-                            os.makedirs(os.path.join(ofile, 'one2one_inference'), exist_ok=True)
+                            os.makedirs(os.path.join(ofile, 'explainability_visualization/imaging_differentiation_map'), exist_ok=True)
                             r.append(
                                 export_pool.starmap_async(
                                     export_prediction_from_logits,
-                                    ((prediction, properties, self.configuration_manager, self.plans_manager,
-                                    self.dataset_json, os.path.join(ofile, 'one2one_inference', 'translate_src_{}_to_tgt_{}'.format(src_seq, tgt_seq)), save_probabilities),)
-                                )
-                            )
-                            r.append(
-                                export_pool.starmap_async(
-                                    export_prediction_from_logits,
-                                    ((prediction_mask, properties, self.configuration_manager, self.plans_manager,
-                                    self.dataset_json, os.path.join(ofile, 'one2one_inference', 'segment_src_{}'.format(src_seq)), save_probabilities),)
-                                )
-                            )
-                            os.makedirs(os.path.join(ofile, 'latent_space'), exist_ok=True)
-                            r.append(
-                                export_pool.starmap_async(
-                                    export_prediction_from_logits,
-                                    ((prediction_latent, properties, self.configuration_manager, self.plans_manager,
-                                    self.dataset_json, os.path.join(ofile, 'latent_space', 'latent_space_src_{}'.format(src_seq)), save_probabilities, True),)
+                                    ((md, properties, self.configuration_manager, self.plans_manager,
+                                    self.dataset_json, os.path.join(ofile, 'explainability_visualization/imaging_differentiation_map', 'imaging_differentiation_map_tgt_{}'.format(tgt_seq)), save_probabilities),)
                                 )
                             )
 
-                            if src_idx==len(properties['available_channel'])-1:
-                                os.makedirs(os.path.join(ofile, 'explainability_visualization/imaging_differentiation_map'), exist_ok=True)
+                        # for src_idx, src_seq in enumerate(properties['available_channel']):
+                        #     prediction, prediction_mask, prediction_latent = self.predict_logits_from_preprocessed_data(data[src_idx:src_idx+1], tgt_code)
+                        #     prediction_mask = torch.argmax(prediction_mask, dim=0, keepdim=True).cpu()
+                        #     prediction_latent = F.interpolate(prediction_latent.to(dtype=torch.float32).unsqueeze(0), scale_factor=0.25)[0].cpu()
+
+                        #     if tgt_seq in properties['available_channel']:
+                        #         tgt_idx = properties['available_channel'].index(tgt_seq)
+                        #         psnr = torch_PSNR(data[tgt_idx:tgt_idx+1], hm_prediction, data_range=1).item()
+                        #         ssim = np_SSIM(data[tgt_idx].numpy(), hm_prediction[0].numpy(), data_range=1)
+                        #         self.one2one_translate_psnr[src_seq][tgt_seq].append(psnr)
+                        #         self.one2one_translate_ssim[src_seq][tgt_seq].append(ssim)
+
+                        #     if ofile is not None:
+                        #         # this needs to go into background processes
+                        #         # export_prediction_from_logits(prediction, properties, self.configuration_manager, self.plans_manager,
+                        #         #                               self.dataset_json, ofile, save_probabilities)
+                        #         print('sending off prediction to background worker for resampling and export')
+                        #         os.makedirs(os.path.join(ofile, 'normalized_source_images'), exist_ok=True)
+                        #         if tgt_seq==0:
+                        #             r.append(
+                        #                 export_pool.starmap_async(
+                        #                     export_prediction_from_logits,
+                        #                     ((data[src_idx:src_idx+1], properties, self.configuration_manager, self.plans_manager,
+                        #                     self.dataset_json, os.path.join(ofile, 'normalized_source_images', 'norm_src_{}'.format(src_seq)), save_probabilities),)
+                        #                 )
+                        #             )
                                 
-                                md /= len(properties['available_channel'])
-                                
-                                if tgt_seq in properties['available_channel']:
-                                    r.append(
-                                        export_pool.starmap_async(
-                                            export_prediction_from_logits,
-                                            ((md, properties, self.configuration_manager, self.plans_manager,
-                                            self.dataset_json, os.path.join(ofile, 'explainability_visualization/imaging_differentiation_map', 'imaging_differentiation_map_tgt_{}'.format(tgt_seq)), save_probabilities),)
-                                        )
-                                    )
-                        else:
-                            # convert_predicted_logits_to_segmentation_with_correct_shape(
-                            #             prediction, self.plans_manager,
-                            #              self.configuration_manager, self.label_manager,
-                            #              properties,
-                            #              save_probabilities)
+                        #         os.makedirs(os.path.join(ofile, 'one2one_inference'), exist_ok=True)
+                        #         r.append(
+                        #             export_pool.starmap_async(
+                        #                 export_prediction_from_logits,
+                        #                 ((prediction, properties, self.configuration_manager, self.plans_manager,
+                        #                 self.dataset_json, os.path.join(ofile, 'one2one_inference', 'translate_src_{}_to_tgt_{}'.format(src_seq, tgt_seq)), save_probabilities),)
+                        #             )
+                        #         )
+                        #         r.append(
+                        #             export_pool.starmap_async(
+                        #                 export_prediction_from_logits,
+                        #                 ((prediction_mask, properties, self.configuration_manager, self.plans_manager,
+                        #                 self.dataset_json, os.path.join(ofile, 'one2one_inference', 'segment_src_{}'.format(src_seq)), save_probabilities),)
+                        #             )
+                        #         )
+                        #         os.makedirs(os.path.join(ofile, 'latent_space'), exist_ok=True)
+                        #         r.append(
+                        #             export_pool.starmap_async(
+                        #                 export_prediction_from_logits,
+                        #                 ((prediction_latent, properties, self.configuration_manager, self.plans_manager,
+                        #                 self.dataset_json, os.path.join(ofile, 'latent_space', 'latent_space_src_{}'.format(src_seq)), save_probabilities, True),)
+                        #             )
+                        #         )
 
-                            print('sending off prediction to background worker for resampling')
-                            r.append(
-                                export_pool.starmap_async(
-                                    convert_predicted_logits_to_segmentation_with_correct_shape, (
-                                        (prediction, self.plans_manager,
-                                        self.configuration_manager, self.label_manager,
-                                        properties,
-                                        save_probabilities),)
-                                )
-                            )
-                        if ofile is not None:
-                            print(f'done with {os.path.basename(ofile)} from src {src_seq} to tgt {tgt_seq}')
-                        else:
-                            print(f'\nDone with image of shape {data.shape}:')
+                        #         if src_idx==len(properties['available_channel'])-1:
+                        #             os.makedirs(os.path.join(ofile, 'explainability_visualization/imaging_differentiation_map'), exist_ok=True)
+                                    
+                        #             md /= len(properties['available_channel'])
+                                    
+                        #             if tgt_seq in properties['available_channel']:
+                        #                 r.append(
+                        #                     export_pool.starmap_async(
+                        #                         export_prediction_from_logits,
+                        #                         ((md, properties, self.configuration_manager, self.plans_manager,
+                        #                         self.dataset_json, os.path.join(ofile, 'explainability_visualization/imaging_differentiation_map', 'imaging_differentiation_map_tgt_{}'.format(tgt_seq)), save_probabilities),)
+                        #                     )
+                        #                 )
+                        #     else:
+                        #         # convert_predicted_logits_to_segmentation_with_correct_shape(
+                        #         #             prediction, self.plans_manager,
+                        #         #              self.configuration_manager, self.label_manager,
+                        #         #              properties,
+                        #         #              save_probabilities)
+
+                        #         print('sending off prediction to background worker for resampling')
+                        #         r.append(
+                        #             export_pool.starmap_async(
+                        #                 convert_predicted_logits_to_segmentation_with_correct_shape, (
+                        #                     (prediction, self.plans_manager,
+                        #                     self.configuration_manager, self.label_manager,
+                        #                     properties,
+                        #                     save_probabilities),)
+                        #             )
+                        #         )
+                        #     if ofile is not None:
+                        #         print(f'done with {os.path.basename(ofile)} from src {src_seq} to tgt {tgt_seq}')
+                        #     else:
+                        #         print(f'\nDone with image of shape {data.shape}:')
             ret = [i.get()[0] for i in r]
 
         if isinstance(data_iterator, MultiThreadedAugmenter):
             data_iterator._finish()
         
-        # calculate synthesis-based sequence contribution
+        # calculate sequence contribution
+        df = pd.DataFrame(data=self.tsf_weight, columns=['input_channel_{}'.format(i) for i in range(self.network.image_encoder.style_dim)]+['channel_weight_{}'.format(i) for i in range(self.network.image_encoder.style_dim)])
+        df.to_csv(join(os.path.dirname(ofile), 'task-specific_sequence_contribution.csv'))
+
         sbsc = []
-        N = self.network.tsf.num_channel
-        A = [[0 for i in range(N)] for i in range(N)]
+        N = self.network.image_encoder.style_dim
+        A = [0 for i in range(N)]
         eps = 1e-9
         all_psnr = []
-        for p1 in self.one2one_translate_psnr:
-            for p2 in p1:
-                all_psnr += p2
+        all_ssim = []
+        for p1, s1 in zip(self.one2one_translate_psnr, self.one2one_translate_ssim):
+            all_psnr += p1
+            all_ssim += s1
         for i in range(N):
-            for j in range(N):
-                if len(self.one2one_translate_psnr[i][j])==0:
-                    continue
-                A[i][j] = (np.nanmean(self.one2one_translate_psnr[i][j])-np.nanmean(all_psnr))/(np.nanstd(all_psnr) + eps)
-        for i in range(N):
-            metric_ct = 0
-            metric_cd = 0
-            for j in range(N):
-                metric_ct += A[i][j]
-                metric_cd -= A[j][i]
-            metric_ct /= N
-            metric_cd /= N
-            sbsc.append([i, metric_ct, metric_cd])
-        df = pd.DataFrame(data=sbsc, columns=['channel', 'metric_ct', 'metric_cd'])
+            if len(self.one2one_translate_psnr[i])==0 or len(self.one2one_translate_ssim[i])==0:
+                continue
+            A[i] = (np.nanmean(self.one2one_translate_psnr[i])-np.nanmean(all_psnr))/(np.nanstd(all_psnr) + eps) + \
+                (np.nanmean(self.one2one_translate_ssim[i])-np.nanmean(all_ssim))/(np.nanstd(all_ssim) + eps)
+            sbsc.append([i, -A[i]])
+        df = pd.DataFrame(data=sbsc, columns=['channel', 'metric_cd'])
         df.to_csv(join(os.path.dirname(ofile), 'synthesis-based_sequence_contribution.csv'))
 
         # clear lru cache
@@ -585,7 +603,7 @@ class nnSeq2SeqPredictor(object):
             else:
                 return ret
 
-    def predict_logits_from_preprocessed_data(self, data: torch.Tensor, target_code: torch.Tensor, properties=None, with_attn: bool=True) -> torch.Tensor:
+    def predict_logits_from_preprocessed_data(self, data: torch.Tensor, target_code: torch.Tensor, properties=None) -> torch.Tensor:
         """
         IMPORTANT! IF YOU ARE RUNNING THE CASCADE, THE SEGMENTATION FROM THE PREVIOUS STAGE MUST ALREADY BE STACKED ON
         TOP OF THE IMAGE AS ONE-HOT REPRESENTATION! SEE PreprocessAdapter ON HOW THIS SHOULD BE DONE!
@@ -612,12 +630,12 @@ class nnSeq2SeqPredictor(object):
                 # second iteration to crash due to OOM. Grabbing that with try except cause way more bloated code than
                 # this actually saves computation time
                 if prediction is None:
-                    prediction, prediction_mask, prediction_latent = self.predict_sliding_window_return_logits(data, target_code, properties, with_attn)
+                    prediction, prediction_mask, prediction_latent = self.predict_sliding_window_return_logits(data, target_code, properties)
                     prediction = prediction.to('cpu')
                     prediction_mask = prediction_mask.to('cpu')
                     prediction_latent = prediction_latent.to('cpu')
                 else:
-                    pred, pred_mask, pred_latent = self.predict_sliding_window_return_logits(data, target_code, properties, with_attn)
+                    pred, pred_mask, pred_latent = self.predict_sliding_window_return_logits(data, target_code, properties)
                     prediction += pred.to('cpu')
                     prediction_mask += pred_mask.to('cpu')
                     prediction_latent += pred_latent.to('cpu')
@@ -668,34 +686,32 @@ class nnSeq2SeqPredictor(object):
                                                   zip((sx, sy, sz), self.configuration_manager.patch_size)]]))
         return slicers
 
-    def _internal_maybe_mirror_and_predict(self, x: torch.Tensor, target_code: torch.Tensor, properties=None, with_attn: bool=True) -> torch.Tensor:
+    def _internal_maybe_mirror_and_predict(self, x: torch.Tensor, target_code: torch.Tensor, properties=None) -> torch.Tensor:
         mirror_axes = self.allowed_mirroring_axes if self.use_mirroring else None
-        if properties is None:
-            prediction, latent_space, _ = self.network(x, target_code, with_latent=True)
-            prediction_mask = self.network.segmentor(latent_space)
-        else:
-            tsf_data = [torch.zeros_like(x[:,0:1]) for _ in range(properties['num_channel'])]
-            for i, seq_i in enumerate(properties['available_channel']):
-                tsf_data[seq_i] = x[:, i:i+1]
-            tsf_data = torch.cat(tsf_data, dim=1)
-            tsf_data = tsf_data.view(-1,1,*x.shape[2:]).to(self.device, non_blocking=True)
-            latent_tsf, _ = self.network.image_encoder(tsf_data)
-            latent_tsf = latent_tsf.reshape(x.shape[0], -1, *latent_tsf.shape[2:])
-            
-            tsf_src_code = torch.from_numpy(np.array([1 if i in properties['available_channel'] else 0 for i in range(properties['num_channel'])])).unsqueeze(0).to(self.device, non_blocking=True)
-            tsf_tgt_code = torch.cat([tsf_src_code, target_code, torch.zeros((target_code.shape[0],1), device=self.device)], dim=1)
-            tsf_seg_code = torch.cat([tsf_src_code, torch.zeros_like(target_code), torch.ones((target_code.shape[0],1), device=self.device)], dim=1)
+        
+        data = [torch.zeros_like(x[:,0:1]) for _ in range(properties['num_channel'])]
+        for i, seq_i in enumerate(properties['available_channel']):
+            data[seq_i] = x[:, i:i+1]
+        data = torch.cat(data, dim=1)
 
-            latent_tsf_tgt, latent_tsf_tgt_finetune = self.network.tsf(latent_tsf, tsf_tgt_code)
-            latent_tsf_seg, latent_tsf_seg_finetune = self.network.tsf(latent_tsf, tsf_seg_code)
-            if with_attn:
-                prediction = self.network.hyper_decoder(latent_tsf_tgt_finetune, target_code)
-                prediction_mask = self.network.segmentor(latent_tsf_seg_finetune)
-                latent_space = latent_tsf_tgt_finetune
-            else:
-                prediction = self.network.hyper_decoder(latent_tsf_tgt, target_code)
-                prediction_mask = self.network.segmentor(latent_tsf_seg)
-                latent_space = latent_tsf_tgt
+        target_code_int = torch.argmax(target_code, dim=1)
+        src_code = torch.from_numpy(np.array([1 if i in properties['available_channel'] and (i!=target_code_int or len(properties['available_channel'])==1) else 0 for i in range(properties['num_channel'])])).unsqueeze(0).to(self.device, dtype=target_code.dtype, non_blocking=True)
+        src_all_code = torch.from_numpy(np.array([1 if i in properties['available_channel'] else 0 for i in range(properties['num_channel'])])).unsqueeze(0).to(self.device, dtype=target_code.dtype, non_blocking=True)
+        
+        weight_all = self.network.image_encoder.latent_fusion(src_all_code)*src_all_code
+        weight_sub = self.network.image_encoder.latent_fusion(src_code)*src_code
+        tsf_record = src_all_code.squeeze().detach().cpu().numpy().tolist()+weight_all.squeeze().detach().cpu().numpy().tolist()
+        if tsf_record not in self.tsf_weight:
+            self.tsf_weight.append(tsf_record)
+        tsf_record = src_code.squeeze().detach().cpu().numpy().tolist()+weight_sub.squeeze().detach().cpu().numpy().tolist()
+        if tsf_record not in self.tsf_weight:
+            self.tsf_weight.append(tsf_record)
+
+        output_src2tgt_sub, latent_src_all = self.network.infer(data, src_all_code, src_code, target_code)
+        mask_src_all = self.network.segmentor(latent_src_all)
+        prediction = output_src2tgt_sub
+        prediction_mask = mask_src_all[0]
+        latent_space = latent_src_all[-1]
             
 
         if mirror_axes is not None:
@@ -707,23 +723,12 @@ class nnSeq2SeqPredictor(object):
                 c for i in range(len(mirror_axes)) for c in itertools.combinations([m + 2 for m in mirror_axes], i + 1)
             ]
             for axes in axes_combinations:
-                if properties is None:
-                    pred, latent, _ = self.network(torch.flip(x, (*axes,)), target_code, with_latent=True)
-                    pred_mask = self.network.segmentor(latent)
-                else:
-                    latent_tsf, _ = self.network.image_encoder(torch.flip(tsf_data, (*axes,)))
-                    latent_tsf = latent_tsf.reshape(x.shape[0], -1, *latent_tsf.shape[2:])
+                output_src2tgt_sub, latent_src_all = self.network.infer(torch.flip(x, (*axes,)), src_all_code, src_code, target_code)
+                mask_src_all = self.network.segmentor(latent_src_all)
+                pred = output_src2tgt_sub
+                pred_mask = mask_src_all[0]
+                latent = latent_src_all[0]
                     
-                    latent_tsf_tgt, latent_tsf_tgt_finetune = self.network.tsf(latent_tsf, tsf_tgt_code)
-                    latent_tsf_seg, latent_tsf_seg_finetune = self.network.tsf(latent_tsf, tsf_seg_code)
-                    if with_attn:
-                        pred = self.network.hyper_decoder(latent_tsf_tgt_finetune, target_code)
-                        pred_mask = self.network.segmentor(latent_tsf_seg_finetune)
-                        latent = latent_tsf_tgt_finetune
-                    else:
-                        pred = self.network.hyper_decoder(latent_tsf_tgt, target_code)
-                        pred_mask = self.network.segmentor(latent_tsf_seg)
-                        latent = latent_tsf_tgt
                 prediction += torch.flip(pred, (*axes,))
                 prediction_mask += torch.flip(pred_mask, (*axes,))
                 latent_space += torch.flip(latent, (*axes,))
@@ -737,7 +742,7 @@ class nnSeq2SeqPredictor(object):
                                                        slicers,
                                                        target_code: torch.Tensor,
                                                        do_on_device: bool = True,
-                                                       properties=None, with_attn: bool=True
+                                                       properties=None
                                                        ):
         predicted_logits = n_predictions = prediction = gaussian = workon = None
         results_device = self.device if do_on_device else torch.device('cpu')
@@ -774,10 +779,10 @@ class nnSeq2SeqPredictor(object):
                 workon = data[sl][None]
                 workon = workon.to(self.device, non_blocking=False)
 
-                prediction, prediction_mask, latent_space = self._internal_maybe_mirror_and_predict(workon, target_code, properties, with_attn)
+                prediction, prediction_mask, latent_space = self._internal_maybe_mirror_and_predict(workon, target_code, properties)
                 prediction = prediction[0].to(results_device)
                 prediction_mask = prediction_mask[0].to(results_device)
-                latent_space = F.interpolate(latent_space, scale_factor=4)[0].to(results_device)
+                latent_space = latent_space[0].to(results_device)
 
                 predicted_logits[sl] += (prediction * gaussian if self.use_gaussian else prediction)
                 predicted_mask_logits[sl] += (prediction_mask * gaussian if self.use_gaussian else prediction_mask)
@@ -800,7 +805,7 @@ class nnSeq2SeqPredictor(object):
             raise e
         return predicted_logits, predicted_mask_logits, predicted_latent_space
 
-    def predict_sliding_window_return_logits(self, input_image: torch.Tensor, target_code: torch.Tensor, properties=None, with_attn: bool=True) \
+    def predict_sliding_window_return_logits(self, input_image: torch.Tensor, target_code: torch.Tensor, properties=None) \
             -> Union[np.ndarray, torch.Tensor]:
         assert isinstance(input_image, torch.Tensor)
         self.network = self.network.to(self.device)
@@ -833,15 +838,15 @@ class nnSeq2SeqPredictor(object):
                     # we need to try except here because we can run OOM in which case we need to fall back to CPU as a results device
                     try:
                         predicted_logits, predicted_mask_logits, predicted_latent_space = self._internal_predict_sliding_window_return_logits(data, slicers, target_code,
-                                                                                               self.perform_everything_on_device, properties, with_attn)
+                                                                                               self.perform_everything_on_device, properties)
                     except RuntimeError:
                         print(
                             'Prediction on device was unsuccessful, probably due to a lack of memory. Moving results arrays to CPU')
                         empty_cache(self.device)
-                        predicted_logits, predicted_mask_logits, predicted_latent_space = self._internal_predict_sliding_window_return_logits(data, slicers, target_code, False, properties, with_attn)
+                        predicted_logits, predicted_mask_logits, predicted_latent_space = self._internal_predict_sliding_window_return_logits(data, slicers, target_code, False, properties)
                 else:
                     predicted_logits, predicted_mask_logits, predicted_latent_space = self._internal_predict_sliding_window_return_logits(data, slicers, target_code,
-                                                                                           self.perform_everything_on_device, properties, with_attn)
+                                                                                           self.perform_everything_on_device, properties)
 
                 empty_cache(self.device)
                 # revert padding
@@ -1011,6 +1016,8 @@ def predict_entry_point():
     parser.add_argument('--disable_progress_bar', action='store_true', required=False, default=False,
                         help='Set this flag to disable progress bar. Recommended for HPC environments (non interactive '
                              'jobs)')
+    parser.add_argument('--segment_only', action='store_true', required=False, default=False,
+                        help='Only do segmentation task.')
 
     print(
         "\n#######################################################################\nPlease cite the following paper "
@@ -1062,6 +1069,7 @@ def predict_entry_point():
         args.f,
         checkpoint_name=args.chk
     )
+    predictor.segment_only = args.segment_only
     predictor.predict_from_files(args.i, args.o, save_probabilities=args.save_probabilities,
                                  overwrite=not args.continue_prediction,
                                  num_processes_preprocessing=args.npp,

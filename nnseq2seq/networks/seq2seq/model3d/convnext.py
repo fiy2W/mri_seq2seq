@@ -173,17 +173,17 @@ class AttnBlock(nn.Module):
                                  self.dim_heads*heads,
                                  kernel_size=1,
                                  stride=1,
-                                 padding=0, bias=False)
+                                 padding=0)
         self.k = torch.nn.Conv3d(in_channels,
                                  self.dim_heads*heads,
-                                 kernel_size=3,
+                                 kernel_size=1,
                                  stride=1,
-                                 padding=1, padding_mode='reflect', bias=False)
+                                 padding=0)
         self.v = torch.nn.Conv3d(in_channels,
                                  self.dim_heads*heads,
-                                 kernel_size=3,
+                                 kernel_size=1,
                                  stride=1,
-                                 padding=1, padding_mode='reflect', bias=False)
+                                 padding=0)
         self.proj_out = torch.nn.Conv3d(self.dim_heads*heads,
                                         in_channels,
                                         kernel_size=1,
@@ -217,49 +217,6 @@ class AttnBlock(nn.Module):
         return x+h_
     
 
-class AttnResBlock(nn.Module):
-    r""" ConvNeXt Block. There are two equivalent implementations:
-    (1) DwConv -> LayerNorm (channels_first) -> 1x1 Conv -> GELU -> 1x1 Conv; all in (N, C, H, W)
-    (2) DwConv -> Permute to (N, H, W, C); LayerNorm (channels_last) -> Linear -> GELU -> Linear; Permute back
-    We use (2) as we find it slightly faster in PyTorch
-    
-    Args:
-        dim (int): Number of input channels.
-        drop_path (float): Stochastic depth rate. Default: 0.0
-        layer_scale_init_value (float): Init value for Layer Scale. Default: 1e-6.
-    """
-    def __init__(self, dim, n_layer, kernel_size=7, padding=3, layer_scale_init_value=1e-6, use_attn=False):
-        super().__init__()
-
-        self.n_layer = n_layer
-        self.use_attn = use_attn
-        
-        if n_layer>0:
-            self.block1 = Block(dim, kernel_size=kernel_size, padding=padding, layer_scale_init_value=layer_scale_init_value)
-        else:
-            self.block1 = nn.Identity()
-        
-        if use_attn:
-            self.attnblocks = nn.ModuleList()
-        self.resblocks = nn.ModuleList()
-        for _ in range(n_layer - 1):
-            if use_attn:
-                self.attnblocks.append(AttnBlock(dim))
-            self.resblocks.append(Block(dim, kernel_size=kernel_size, padding=padding, layer_scale_init_value=layer_scale_init_value))
-
-    def forward(self, x):
-        x = self.block1(x)
-
-        if self.use_attn:
-            for attn, res in zip(self.attnblocks, self.resblocks):
-                x = attn(x)
-                x = res(x)
-        else:
-            for res in self.resblocks:
-                x = res(x)
-        return x
-    
-    
 class CrossAttnBlock(nn.Module):
     def __init__(self, in_channels, in_channels_style, heads=1):
         super().__init__()
@@ -268,15 +225,14 @@ class CrossAttnBlock(nn.Module):
         self.dim_heads = in_channels//heads
 
         self.norm = LayerNorm(in_channels, eps=1e-6, data_format='channels_first')
-        self.norm_style = nn.LayerNorm(in_channels_style, eps=1e-6)
         self.q = torch.nn.Conv3d(in_channels,
-                                 self.dim_heads*heads,
+                                 in_channels,
                                  kernel_size=1,
                                  stride=1,
-                                 padding=0, bias=False)
-        self.k = torch.nn.Linear(in_channels_style, self.dim_heads*heads, bias=False)
-        self.v = torch.nn.Linear(in_channels_style, self.dim_heads*heads, bias=False)
-        self.proj_out = torch.nn.Conv3d(self.dim_heads*heads,
+                                 padding=0)
+        self.k = torch.nn.Linear(in_channels_style, in_channels)
+        self.v = torch.nn.Linear(in_channels_style, in_channels)
+        self.proj_out = torch.nn.Conv3d(in_channels,
                                         in_channels,
                                         kernel_size=1,
                                         stride=1,
@@ -285,7 +241,7 @@ class CrossAttnBlock(nn.Module):
     def forward(self, x, s):
         h_ = x
         h_ = self.norm(h_)
-        s_ = self.norm_style(s)
+        s_ = s
         q = self.q(h_)
         k = self.k(s_).permute(0,2,1)
         v = self.v(s_).permute(0,2,1)
@@ -311,6 +267,38 @@ class CrossAttnBlock(nn.Module):
         return x+h_
 
 
+class AttnResBlock(nn.Module):
+    r""" ConvNeXt Block. There are two equivalent implementations:
+    (1) DwConv -> LayerNorm (channels_first) -> 1x1 Conv -> GELU -> 1x1 Conv; all in (N, C, H, W)
+    (2) DwConv -> Permute to (N, H, W, C); LayerNorm (channels_last) -> Linear -> GELU -> Linear; Permute back
+    We use (2) as we find it slightly faster in PyTorch
+    
+    Args:
+        dim (int): Number of input channels.
+        drop_path (float): Stochastic depth rate. Default: 0.0
+        layer_scale_init_value (float): Init value for Layer Scale. Default: 1e-6.
+    """
+    def __init__(self, dim, n_layer, kernel_size=7, padding=3, layer_scale_init_value=1e-6, use_attn=False):
+        super().__init__()
+
+        self.n_layer = n_layer
+        self.use_attn = use_attn
+        
+        if use_attn:
+            self.attnblocks = AttnBlock(dim)
+
+        self.resblocks = nn.ModuleList()
+        for _ in range(n_layer):
+            self.resblocks.append(Block(dim, kernel_size=kernel_size, padding=padding, layer_scale_init_value=layer_scale_init_value))
+
+    def forward(self, x):
+        for i, res in enumerate(self.resblocks):
+            if self.use_attn and i==self.n_layer//2:
+                x = self.attnblocks(x)
+            x = res(x)
+        return x
+    
+
 class hyperAttnResBlock(nn.Module):
     r""" ConvNeXt Block. There are two equivalent implementations:
     (1) DwConv -> LayerNorm (channels_first) -> 1x1 Conv -> GELU -> 1x1 Conv; all in (N, C, H, W)
@@ -328,30 +316,16 @@ class hyperAttnResBlock(nn.Module):
         self.n_layer = n_layer
         self.use_attn = use_attn
         
-        if n_layer>0:
-            self.block1 = hyperBlock(dim, style_dim, latent_dim=latent_dim, kernel_size=kernel_size, padding=padding, layer_scale_init_value=layer_scale_init_value)
-        else:
-            self.block1 = nn.Identity()
-        
         if use_attn:
-            self.attnblocks = nn.ModuleList()
+            self.attnblocks = CrossAttnBlock(dim, style_dim)
+
         self.resblocks = nn.ModuleList()
-        for _ in range(n_layer - 1):
-            if use_attn:
-                self.attnblocks.append(CrossAttnBlock(dim, style_dim))
+        for _ in range(n_layer):
             self.resblocks.append(hyperBlock(dim, style_dim, latent_dim=latent_dim, kernel_size=kernel_size, padding=padding, layer_scale_init_value=layer_scale_init_value))
 
     def forward(self, x, s):
-        if self.n_layer==0:
-            x = self.block1(x)
-        else:
-            x = self.block1(x, s)
-
-        if self.use_attn:
-            for attn, res in zip(self.attnblocks, self.resblocks):
-                x = attn(x, s.unsqueeze(1))
-                x = res(x, s)
-        else:
-            for res in self.resblocks:
-                x = res(x, s)
+        for i, res in enumerate(self.resblocks):
+            if self.use_attn and i==self.n_layer//2:
+                x = self.attnblocks(x, s.unsqueeze(1))
+            x = res(x, s)
         return x

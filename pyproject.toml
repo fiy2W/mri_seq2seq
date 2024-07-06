@@ -35,6 +35,7 @@ dependencies = [
     "yacs",
     "lpips",
     "timm",
+    "einops",
 ]
 
 [tool.setuptools.packages.find]

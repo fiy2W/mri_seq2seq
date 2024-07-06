@@ -27,7 +27,7 @@ If you already know what configuration you need, you can also specify that with 
 
 `nnSeq2Seq_plan_and_preprocess` will create a new subfolder in your `nnSeq2Seq_preprocessed` folder named after the dataset. Once the command is completed, there will be a `dataset_fingerprint.json` file and a `nnSeq2SeqPlans.json` file for you to look at (in case you are interested!). Subfolders containing the preprocessed data for your network configurations will also be created.
 
-Automatic configuration is expected to occupy no more than 12G of GPU memory. If you want to use more or less GPU memory, please modify the `batch_size` or `patch_size` in `nnSeq2SeqPlans.json`. Note that, `patch_size` needs to be divisible by 16.
+Automatic configuration is expected to occupy no more than 24G of GPU memory. If you want to use more or less GPU memory, please modify the `batch_size` or `patch_size` in `nnSeq2SeqPlans.json`. Note that, `patch_size` needs to be divisible by 16.
 
 ```json
 {
@@ -113,21 +113,20 @@ In each model training output folder (each of the fold_x folder), the following 
   - epoch_X.jpg: synthesis images and segmentation at epoch X
     |  |  |  |  |  |  |  |  |
     |--|--|--|--|--|--|--|--|
-    | src | src2tgt | tgt | sl_mask | src | src2rand | int | int2rand |
-    | rand2tgt | tgt | src_mask | label | src2rand_mask | label| int2rand_mask | label |
-    | tgt | tsf | tsf_finetune | tsem | label | tsf_mask | tsf_mask_finetune | tsem_mask |
-  - latent_space.jpg: vector quantized common (VQC)-latent space
-    |  |  |  |  |  |  |  |  |
-    |--|--|--|--|--|--|--|--|
-    | latent_src | latent_src2rand | latent_int2rand | latent_int | latent_reparam | latent_tsf | latent_tsf_finetune | latent_tsf_seg_finetune |
+    | tgt | src_all2tgt | src_sub2tgt | abs(src_all2tgt-src_sub2tgt) | rand | src_all2rand | src_sub2rand | abs(src_all2rand-src_sub2rand) |
+    | label | src_all2mask | src_sub2mask | - | - | - | - | - |
+  - latent_space_X.jpg: vector quantized common (VQC)-latent space
+    |  |  |
+    |--|--|
+    | latent_src_all | latent_src_sub |
   - discriminator.jpg: sample images for each channel
     |  |  |  |  |
     |--|--|--|--|
     | channel_0 | channel_1 | ... | channel_N |
   - deep_X.jpg: synthesis images of deep supervision
-    |  |  |  |  |
-    |--|--|--|--|
-    | src2tgt | tgt | rand2tgt | tgt |
+    |  |  |  |  |  |  |  |  |
+    |--|--|--|--|--|--|--|--|
+    | src_all2tgt | tgt | src_sub2tgt | tgt | src_all2mask | label | src_sub2mask | label |
 
 ## Run inference
 Remember that the data located in the input folder must have the file endings as the dataset you trained the model on and must adhere to the nnU-Net naming scheme for image files (see [dataset format](dataset_format.md) and [inference data format](dataset_format_inference.md)!)
@@ -147,6 +146,8 @@ python nnseq2seq/inference/predict_from_raw_data.py \
 nnSeq2Seq_predict -i INPUT_FOLDER -o OUTPUT_FOLDER -d DATASET_ID -c CONFIG -f FOLD_ID -chk CKPT_NAME
 ```
 
+If you only want to output segmentation, add a `--segment_only` to the inference command.
+
 The results in `OUTPUT_FOLDER` look like this:
 ```
 OUTPUT_FOLDER/
@@ -158,28 +159,16 @@ OUTPUT_FOLDER/
 │   │   ├── norm_src_{ID2}.nii.gz
 │   │   ├── ...
 │   ├── latent_space
-│   │   ├── latent_space_src_{ID1}.nii.gz
-│   │   ├── latent_space_src_{ID2}.nii.gz
-│   │   ├── ...
-│   ├── one2one_inference
-│   │   ├── translate_src_{ID1}_tgt_{ID2}.nii.gz
-│   │   ├── translate_src_{ID2}_tgt_{ID1}.nii.gz
-│   │   ├── segment_src_{ID1}.nii.gz
-│   │   ├── segment_src_{ID2}.nii.gz
-│   │   ├── ...
+│   │   ├── latent_space.nii.gz
 │   ├── multi2one_inference
 │   │   ├── translate_tgt_{ID1}.nii.gz
 │   │   ├── translate_tgt_{ID2}.nii.gz
-│   │   ├── segment.nii.gz
+│   │   ├── segmentation.nii.gz
 │   │   ├── ...
 │   ├── explainability_visualization
 │   │   ├── imaging_differentiation_map
 │   │   │   ├── imaging_differentiation_map_tgt_{ID1}.nii.gz
 │   │   │   ├── imaging_differentiation_map_tgt_{ID2}.nii.gz
-│   │   │   ├── ...
-│   │   ├── task-specific_enhanced_map
-│   │   │   ├── task-specific_enhanced_map_tgt_{ID1}.nii.gz
-│   │   │   ├── task-specific_enhanced_map_tgt_{ID2}.nii.gz
 │   │   │   ├── ...
 ├── CASE_IDENTIFER_2
 │   ├── ...
@@ -190,10 +179,7 @@ OUTPUT_FOLDER/
 
 Each `CASE_IDENTIFER` has a separate folder where the results can be saved. Results include:
 - `norm_src_{ID}.nii.gz`: Normalized source image of channel `ID`.
-- `latent_space_src_{ID}.nii.gz`: VQC-latent space of channel `ID`.
-- `translate_src_{ID1}_tgt_{ID2}.nii.gz`: Prediction of translating channel `ID1` to `ID2`.
-- `segment_src_{ID}.nii.gz`: Prediction of segmenting channel `ID`.
+- `latent_space.nii.gz`: VQC-latent space of all available channels.
 - `translate_tgt_{ID}.nii.gz`: Prediction of translating all available channels to channel `ID`.
-- `segment.nii.gz`: Prediction of segmenting using all available channels.
+- `segmentation.nii.gz`: Prediction of segmenting using all available channels.
 - `imaging_differentiation_map_tgt_{ID}.nii.gz`: Imaging differnetiation map of channel `ID`.
-- `task-specific_enhanced_map_tgt_{ID}.nii.gz`: Task-specific enhanced map of channel `ID`.

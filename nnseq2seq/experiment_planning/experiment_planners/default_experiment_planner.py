@@ -52,7 +52,7 @@ class ExperimentPlanner(object):
         self.UNet_class_3d = Seq2Seq3d
         # the following two numbers are really arbitrary and were set to reproduce nnSeq2Seq v1's configurations as
         # much as possible
-        self.UNet_reference_val_3d = 500000000  #560000000  # 455600128  550000000
+        self.UNet_reference_val_3d = 450000000  #560000000  # 455600128  550000000
         self.UNet_reference_val_2d = 70000000  #85000000  # 83252480
         #self.UNet_reference_com_nfeatures = 32
         self.UNet_reference_val_corresp_GB = 8
@@ -285,26 +285,27 @@ class ExperimentPlanner(object):
             'arch_kwargs': {
                 'image_encoder': {
                     'in_channels': 1,
-                    'conv_channels': [96, 192, 384],
-                    'conv_kernel': [4, 2, 2],
-                    'conv_stride': [4, 2, 2],
-                    'resblock_n': [3, 3, 3],
-                    'resblock_kernel': [3, 3, 3],
-                    'resblock_padding': [1, 1, 1],
+                    'conv_channels': [32, 64, 128, 256, 256],
+                    'conv_kernel': [3, 2, 2, 2, 2],
+                    'conv_stride': [1, 2, 2, 2, 2],
+                    'resblock_n': [2, 2, 4, 4, 4],
+                    'resblock_kernel': [3, 3, 3, 3, 3],
+                    'resblock_padding': [1, 1, 1, 1, 1],
                     'layer_scale_init_value': 0.000001,
+                    'hyper_conv_dim': 16,
                     'latent_space_dim': 3,
+                    'style_dim': num_input_channels,
                     'vq_n_embed': 8192,
                     'vq_beta': 0.25,
                 },
                 'image_decoder': {
                     'out_channels': 1,
-                    'conv_channels': [384, 192, 96],
-                    'conv_kernel': [4, 4, 4],
-                    'conv_stride': [2, 2, 2],
-                    'conv_down': [4, 2, 1],
-                    'resblock_n': [3, 3, 3],
-                    'resblock_kernel': [3, 3, 3],
-                    'resblock_padding': [1, 1, 1],
+                    'conv_channels': [256, 256, 128, 64, 32],
+                    'conv_kernel': [3, 3, 3, 3, 3],
+                    'conv_stride': [2, 2, 2, 2, 1],
+                    'resblock_n': [4, 4, 4, 2, 2],
+                    'resblock_kernel': [3, 3, 3, 3, 3],
+                    'resblock_padding': [1, 1, 1, 1, 1],
                     'layer_scale_init_value': 0.000001,
                     'hyper_conv_dim': 16,
                     'latent_space_dim': 3,
@@ -312,16 +313,22 @@ class ExperimentPlanner(object):
                     'deep_supervision': True,
                 },
                 'segmentor': {
-                    'latent_space_dim': 3,
                     'num_classes': len(self.dataset_json['labels'].keys()),
-                    'upsample_scale': 4,
+                    'conv_channels': [256, 256, 128, 64, 32],
+                    'conv_kernel': [3, 3, 3, 3, 3],
+                    'conv_stride': [2, 2, 2, 2, 1],
+                    'resblock_n': [4, 4, 4, 2, 2],
+                    'resblock_kernel': [3, 3, 3, 3, 3],
+                    'resblock_padding': [1, 1, 1, 1, 1],
+                    'layer_scale_init_value': 0.000001,
+                    'latent_space_dim': 3,
                 },
                 'discriminator': {
                     'in_channels': 1,
-                    'conv_channels': [96, 192, 384, 384],
-                    'layer_scale_init_value': 0.000001,
-                    'hyper_conv_dim': 16,
-                    'style_dim': num_input_channels,
+                    'ndf': 64,
+                    'n_layers': 3,
+                    'kw': 4,
+                    'padw': 1,
                 },
                 #'n_stages': num_stages,
                 #'features_per_stage': _features_per_stage(num_stages, max_num_features),

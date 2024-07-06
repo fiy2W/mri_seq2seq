@@ -1,8 +1,10 @@
+import numpy as  np
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nnseq2seq.networks.seq2seq.model2d.convnext import Block, LayerNorm, ResBlock, hyperResBlock, hyperAttnResBlock
+from nnseq2seq.networks.seq2seq.model2d.convnext import LayerNorm, AttnResBlock, hyperAttnResBlock, hyperConv
 
 
 class HyperImageDecoder(nn.Module):
@@ -13,7 +15,6 @@ class HyperImageDecoder(nn.Module):
         self.c_enc = args['conv_channels']
         self.k_enc = args['conv_kernel']
         self.s_enc = args['conv_stride']
-        self.d_enc = args['conv_down']
         self.n_res = args['resblock_n']
         self.k_res = args['resblock_kernel']
         self.p_res = args['resblock_padding']
@@ -24,58 +25,46 @@ class HyperImageDecoder(nn.Module):
         self.deep_supervision = args['deep_supervision']
 
         self.down_layers = nn.ModuleList()
-        self.midconv_layers = nn.ModuleList()
         self.midres_layers = nn.ModuleList()
         self.up_layers = nn.ModuleList()
         self.deep_layers = nn.ModuleList()
-        for i, (ce, ke, se, de, nr, kr, pr) in enumerate(zip(self.c_enc, self.k_enc, self.s_enc, self.d_enc, self.n_res, self.k_res, self.p_res)):
-            self.down_layers.append(nn.Sequential(
-                nn.Conv2d(in_channels=self.latent_space_dim, out_channels=ce, kernel_size=de, padding=0, stride=de),
-            ))
-            if i==0:
-                self.midconv_layers.append(nn.Identity())
-            else:
-                self.midconv_layers.append(nn.Sequential(
-                    nn.Conv2d(c_pre+ce, out_channels=ce, kernel_size=1, padding=0, stride=1),
-                ))
+        up_scale = np.prod(self.s_enc)
+        for i, (ce, ke, se, nr, kr, pr) in enumerate(zip(self.c_enc, self.k_enc, self.s_enc, self.n_res, self.k_res, self.p_res)):
+            self.down_layers.append(
+                hyperConv(self.style_dim, self.latent_space_dim if i==0 else self.latent_space_dim+ce, ce, ksize=3, padding=1, weight_dim=self.hyper_dim, ndims=2),
+            )
             self.midres_layers.append(
-                #hyperResBlock(ce, self.style_dim, nr, self.hyper_dim, kr, pr, layer_scale_init_value=self.layer_scale_init_value)
-                hyperAttnResBlock(ce, self.style_dim, nr, self.hyper_dim, kr, pr, layer_scale_init_value=self.layer_scale_init_value, use_attn=True)
-                )
-            self.up_layers.append(nn.Sequential(
-                    #nn.ConvTranspose2d(ce, out_channels=ce, kernel_size=ke, padding=se//2, stride=se),
-                    nn.Upsample(scale_factor=se, mode='bilinear', align_corners=True),
-                ))
+                hyperAttnResBlock(ce, self.style_dim, nr, self.hyper_dim, kr, pr, layer_scale_init_value=self.layer_scale_init_value, use_attn=True if up_scale>=4 else False)
+            )
             self.deep_layers.append(nn.Sequential(
+                LayerNorm(ce, eps=1e-6, data_format="channels_first"),
                 nn.Conv2d(ce, out_channels=self.c_out, kernel_size=3, padding=1, stride=1, padding_mode='zeros'),
                 nn.LeakyReLU(0.01, inplace=True),
             ))
-            c_pre = ce
-        
-        self.up_out = nn.Sequential(
-            ResBlock(c_pre, n_layer=1, kernel_size=3, padding=1, layer_scale_init_value=self.layer_scale_init_value),
-            #nn.ConvTranspose2d(c_pre, out_channels=c_pre//2, kernel_size=4, padding=1, stride=2),
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
-            nn.Conv2d(c_pre, out_channels=c_pre//2, kernel_size=3, padding=1, stride=1, padding_mode='zeros'),
-            LayerNorm(c_pre//2, eps=1e-6, data_format="channels_first"),
-            nn.LeakyReLU(0.01, inplace=True),
-            nn.Conv2d(c_pre//2, out_channels=self.c_out, kernel_size=3, padding=1, stride=1, padding_mode='zeros'),
-            nn.LeakyReLU(0.01, inplace=True),
-        )
+            if i==(len(self.c_enc)-1):
+                self.up_layers.append(nn.Identity())
+            else:
+                self.up_layers.append(nn.Sequential(
+                    LayerNorm(ce, eps=1e-6, data_format="channels_first"),
+                    nn.Conv2d(ce, out_channels=self.c_enc[i+1], kernel_size=3, padding=1, stride=1, padding_mode='zeros'),
+                    nn.Upsample(scale_factor=se, mode='nearest'),
+                ))
+                up_scale = up_scale//se
             
-    def forward(self, z, s):
+    def forward(self, zqs, s):
         outputs = []
-        for i, (down, midc, midr, up, deep) in enumerate(zip(self.down_layers, self.midconv_layers, self.midres_layers, self.up_layers, self.deep_layers)):
-            x = down(z)
-            if i!=0:
-                x = torch.cat([x, x_pre], dim=1)
-            x = midc(x)
+        up_scale = np.prod(self.s_enc)
+        for i, (z, down, midr, deep, up) in enumerate(zip(zqs, self.down_layers, self.midres_layers, self.deep_layers, self.up_layers)):
+            if i==0:
+                x = down(z, s)
+            else:
+                x = down(torch.cat([z, x], dim=1), s)
+            
             x = midr(x, s)
-            x_pre = up(x)
-            outputs.append(deep(x_pre))
-        x = self.up_out(x_pre)
-        outputs.append(x)
-
+            outputs.append(deep(x))
+            x = up(x)
+            up_scale = up_scale//self.s_enc[i]
+            
         outputs = outputs[::-1]
 
         if not self.deep_supervision:

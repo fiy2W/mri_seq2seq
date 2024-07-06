@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nnseq2seq.networks.seq2seq.model2d.convnext import LayerNorm, hyperAttnResBlock
+from nnseq2seq.networks.seq2seq.model2d.convnext import LayerNorm
 
 
 class NLayerDiscriminator(nn.Module):
@@ -11,33 +11,36 @@ class NLayerDiscriminator(nn.Module):
     def __init__(self, args):
         super(NLayerDiscriminator, self).__init__()
 
-        self.c_in = args['in_channels']
-        self.c_enc = args['conv_channels']
-        self.layer_scale_init_value = args['layer_scale_init_value']
-        self.hyper_dim = args['hyper_conv_dim']
-        self.style_dim = args['style_dim']
+        c_in = args['in_channels']
+        ndf = args['ndf']
+        n_layers = args['n_layers']
+        kw = args['kw']
+        padw = args['padw']
 
-        ndf = self.c_enc[0]
-        kw = 4
-        padw = 1
-        
-        sequence = [nn.Conv2d(self.c_in, ndf, kernel_size=kw, stride=2, padding=padw), nn.LeakyReLU(0.2, True)]
-        nc_pre = ndf
-        for nc in self.c_enc[1:]:  # gradually increase the number of filters
+        sequence = [nn.Conv2d(c_in, ndf, kernel_size=kw, stride=2, padding=padw), nn.LeakyReLU(0.2, True)]
+        nf_mult = 1
+        nf_mult_prev = 1
+        for n in range(1, n_layers):  # gradually increase the number of filters
+            nf_mult_prev = nf_mult
+            nf_mult = min(2 ** n, 8)
             sequence += [
-                nn.Conv2d(nc_pre, nc, kernel_size=kw, stride=2, padding=padw),
-                LayerNorm(nc, eps=1e-6, data_format="channels_first"),
-                nn.LeakyReLU(0.2, True),
+                nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=2, padding=padw, bias=False),
+                LayerNorm(ndf * nf_mult, eps=1e-6, data_format="channels_first"),
+                nn.LeakyReLU(0.2, True)
             ]
-            nc_pre = nc
 
-        self.encoder = nn.Sequential(*sequence)
-        self.hyperblocks = hyperAttnResBlock(nc, self.style_dim, 2, latent_dim=self.hyper_dim, kernel_size=3, padding=1, layer_scale_init_value=self.layer_scale_init_value, use_attn=True)
-        self.conv_out = nn.Conv2d(nc, 1, kernel_size=kw, stride=1, padding=padw)  # output 1 channel prediction map
+        nf_mult_prev = nf_mult
+        nf_mult = min(2 ** n_layers, 8)
+        sequence += [
+            nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=1, padding=padw, bias=False),
+            LayerNorm(ndf * nf_mult, eps=1e-6, data_format="channels_first"),
+            nn.LeakyReLU(0.2, True)
+        ]
 
-    def forward(self, input, s):
-        x = self.encoder(input)
-        x = self.hyperblocks(x, s)
-        x = self.conv_out(x)
+        sequence += [
+            nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]  # output 1 channel prediction map
+        self.main = nn.Sequential(*sequence)
 
-        return x
+    def forward(self, input):
+        """Standard forward."""
+        return self.main(input)
