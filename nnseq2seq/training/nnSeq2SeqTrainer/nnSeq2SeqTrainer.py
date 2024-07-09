@@ -385,10 +385,10 @@ class nnSeq2SeqTrainer(object):
         #                           ignore_label=self.label_manager.ignore_label, dice_class=MemoryEfficientSoftDiceLoss)
         spatial_dims = 2 if self.configuration_name=='2d' else 3
         if spatial_dims==2:
-            weight_perceptual = 0.1
+            weight_perceptual = 0.01
             scale_factor = 1
         else:
-            weight_perceptual = 0.1
+            weight_perceptual = 0.01
             scale_factor = 1
         loss = L1_SSIM_and_Perceptual_loss(self.device, weight_l1=10, weight_ssim=1, weight_perceptual=weight_perceptual, spatial_dims=spatial_dims)
         loss_seg = DC_and_CE_loss({'batch_dice': self.configuration_manager.batch_dice,
