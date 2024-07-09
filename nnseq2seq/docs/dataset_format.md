@@ -125,6 +125,8 @@ Here is what the `dataset.json` should look like in the example of the `Dataset0
 ```
 We added `numChannel` to declare the total number of sequences or modalities.
 
+**Note: Sequence with `"input"` in `"channel_names"` will be set as input domain (only used as input channel), sequence with `"output"` in `"channel_names"` will be set as output domain (only used as output channel).** This is mainly used to specialize the model on specific tasks.
+
 **Note: Cases with `"foreground"` in the `"label"` are ignored when calculating the segmentation loss during training.** This is primarily used when there are cases of missing segmentation labels in the dataset.
 
 The `channel_names` determine the normalization used by nnSeq2Seq. If a channel is marked as `CT`, then a global normalization based on the intensities in the foreground pixels will be used. If it is something else, a per-channel percentile will be used. See [here](intensity_normalization.md) for more information about custom intensity normalization.

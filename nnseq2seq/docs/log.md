@@ -4,6 +4,12 @@
 - [ ] Add inference API.
 
 ## Update log
+### v0.1.2 (Alpha)
+**`[Update]:`**
+- Update weight of perceptual loss.
+- Sequence with `'input'` in `channel_names` will be set as input domain (only used as input channel), sequence with `'output'` in `channel_names` will be set as output domain (only used as output channel).
+- Update documents.
+
 ### v0.1.1 (2024-07-06)
 **`[Update]:`**
 - Update Seq2Seq models with VQ-U-Net architecture.

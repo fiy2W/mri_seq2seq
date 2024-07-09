@@ -937,7 +937,7 @@ class nnSeq2SeqTrainer(object):
     def random_select_seq_code(self, properties):
         output_code = []
         for bid in range(len(properties)):
-            seq_id = random.choice([i for i in range(self.num_input_channels)])
+            seq_id = random.choice([i for i in range(self.num_input_channels) if i not in properties[bid]['input_domain']])
             output_code.append(seq_id)
         output_code = torch.from_numpy(np.array(output_code)).to(dtype=torch.int64)
         return output_code
@@ -950,7 +950,7 @@ class nnSeq2SeqTrainer(object):
         for bid in range(len(properties)):
             if self.tgt_seq_pool is None:
                 self.tgt_seq_pool = [0 for i in range(self.num_input_channels)]
-            inner_list = [v if i in properties[bid]['available_channel'] else 1e+9 for i, v in enumerate(self.tgt_seq_pool)]
+            inner_list = [v if i in properties[bid]['available_channel'] and i not in properties[bid]['input_domain'] else 1e+9 for i, v in enumerate(self.tgt_seq_pool)]
             #seq_id = random.choice(properties[bid]['available_channel'])
             seq_id = np.int64(inner_list.index(min(inner_list)))
             output_data.append(data[bid:bid+1, seq_id:seq_id+1])
@@ -976,10 +976,11 @@ class nnSeq2SeqTrainer(object):
         output_code = []
         output_code_all = []
         for bid in range(len(properties)):
-            seqs_id = np.sort(random.sample(properties[bid]['available_channel'], random.choice(
-                [i for i in range(1, max(2, len(properties[bid]['available_channel'])))])))
+            available_input = [i for i in properties[bid]['available_channel'] if i not in properties[bid]['output_domain']]
+            seqs_id = np.sort(random.sample(available_input, random.choice(
+                [i for i in range(1, max(2, len(available_input)))])))
             output_code.append([1 if i in seqs_id and (i!=tgt_id[bid] or len(seqs_id)==1) else 0 for i in range(self.num_input_channels)])
-            output_code_all.append([1 if i in properties[bid]['available_channel'] else 0 for i in range(self.num_input_channels)])
+            output_code_all.append([1 if i in available_input else 0 for i in range(self.num_input_channels)])
             
         output_code = torch.from_numpy(np.array(output_code))
         output_code_all = torch.from_numpy(np.array(output_code_all))

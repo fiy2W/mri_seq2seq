@@ -16,6 +16,8 @@ Referring to [nnU-Net](https://github.com/MIC-DKFZ/nnUNet), we propose nnSeq2Seq
   - [x] Segmentation
     - Input: [DCE] $\rightarrow$ Output: [Tumor]
     - Input: [T1, T1Gd, T2, FLAIR] $\rightarrow$ Output: [Tumor]
+  - [ ] Inpainting
+  - [ ] Deblur and super-resolution
   - [x] vector quantized common (VQC)-latent space compression
     - Input: [CT] $\rightarrow$ Output: [VQC]
     - Input: [T1, T2] $\rightarrow$ Output: [VQC]
