@@ -1,4 +1,6 @@
 # Seq2Seq: Sequence-to-Sequence Generator
+[![Translate](https://img.shields.io/badge/翻译-中文-red)](README_cn.md)
+
 We are committed to exploring the application of synthesis or fusion for multi-sequence MRI (also including other modalities such as CT) in clinical settings.
 
 Seq2Seq is a series of dynamic multi-domain models that can translate an arbitrary sequence to a target sequence.
@@ -48,3 +50,21 @@ Medical Image Analysis. [![doi](https://img.shields.io/badge/DOI-8A2BE2)](https:
   
     **An Explainable Deep Framework: Towards Task-Specific Fusion for Multi-to-One MRI Synthesis**  
 MICCAI2023. [![doi](https://img.shields.io/badge/DOI-8A2BE2)](https://doi.org/10.1007/978-3-031-43999-5_5) [![arXiv](https://img.shields.io/badge/arXiv-2307.00885-red)](https://arxiv.org/abs/2307.00885) [![code](https://img.shields.io/badge/code-brightgreen)](publications/src/tsf/README.md)
+
+  * VQ-Seq2Seq: a generative model that compresses discrete representations of each sequence to estimate the Gaussian distribution of vector-quantized common (VQC) latent space between multiple sequences.
+
+    **Non-Adversarial Learning: Vector-Quantized Common Latent Space for Multi-Sequence MRI**
+MICCAI2024. [![doi](https://img.shields.io/badge/DOI-8A2BE2)](
+https://doi.org/10.1007/978-3-031-72120-5_45) [![arXiv](https://img.shields.io/badge/arXiv-2407.02911-red)](https://arxiv.org/abs/2407.02911) [![code](https://img.shields.io/badge/code-brightgreen)](publications/src/vq/README.md)
+
+## <span id = "acknowledgements">Acknowledgements</span>
+<img src="documentation/assets/logo-radboudumc.png" height="100px"/>
+<img src="documentation/assets/logo-netherlands-cancer-institute.png" height="100px"/>
+<img src="documentation/assets/logo-macao-polytechnic-university.png" height="100px"/>
+
+## <span id = "contact">Contact</span>
+For any code-related problems or questions please [open an issue](https://github.com/fiy2W/mri_seq2seq/issues/new) or concat us by emails.
+
+- [Ritse.Mann@radboudumc.nl](mailto:Ritse.Mann@radboudumc.nl) (Ritse Mann)
+- [taotan@mpu.edu.mo](mailto:taotan@mpu.edu.mo) (Tao Tan)
+- [Luyi.Han@radboudumc.nl](mailto:Luyi.Han@radboudumc.nl) (Luyi Han)

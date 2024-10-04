@@ -10,14 +10,17 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+import torchvision
 
 import sys
 sys.path.append('./publications/')
 
 from src.seq2seq.utils import poly_lr, Recorder, Plotter, save_grid_images, torch_PSNR
 from src.seq2seq.losses import PerceptualLoss
-from src.seq2seq.dataloader.brats import Dataset_brats
-from src.seq2seq.models.seq2seq import Generator
+from src.vq.dataloader.brats import Dataset_brats
+from src.vq.dataloader.augmentation import random_aug
+from src.vq.models.vqseq2seq import Generator
+from src.vq.loss import SSIMLoss
 
 
 def train(args, net, device):
@@ -40,8 +43,12 @@ def train(args, net, device):
     crop_size = args['train']['crop_size']
     valid_size = args['train']['valid_size']
     lambda_rec = args['train']['lambda_rec']
+    lambda_ssim = args['train']['lambda_ssim']
     lambda_per = args['train']['lambda_per']
-    lambda_cyc = args['train']['lambda_cyc']
+    lambda_con = args['train']['lambda_con']
+    lambda_vq = args['train']['lambda_vq']
+    pretrain_epochs_contrast = args['train']['pretrain_epochs_contrast']
+    pretrain_epochs_rand = args['train']['pretrain_epochs_rand']
     
     logging.info(f'''Starting training:
         Epochs:          {epochs}
@@ -52,16 +59,15 @@ def train(args, net, device):
         Device:          {device.type}
     ''')
     
-    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(net.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.05)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lr_lambda=lambda epoch: poly_lr(epoch, epochs, lr, min_lr=1e-6)/lr)
     perceptual = PerceptualLoss().to(device=device)
-        
-    recorder = Recorder(['train_loss', 'psnr'])
-    plotter = Plotter(dir_visualize, keys1=['train_loss'], keys2=['psnr'])
+    recorder = Recorder(['rec', 'con', 'vq', 'psnr'])
+    plotter = Plotter(dir_visualize, keys2=['psnr'], keys1=['rec', 'con', 'vq'])
     
     with open(os.path.join(dir_checkpoint, 'log.csv'), 'w') as f:
-        f.write('epoch,train_loss,psnr\n')
+        f.write('epoch,rec,con,vq,psnr\n')
 
     total_step = 0
     best_psnr = 0
@@ -69,19 +75,18 @@ def train(args, net, device):
         if epoch!=0:
             scheduler.step()
         net.train()
-        train_losses = []
+        train_metrics = {
+            'total': [], 'rec': [], 'con': [], 'vq': [],
+        }
+        print('Epoch {}, learning rate={}'.format(epoch, optimizer.param_groups[0]['lr']))
+
         with tqdm(total=n_train*rep_step, desc=f'Epoch {epoch + 1}/{epochs}', unit='img') as pbar:
-            #loader_T2 = iter(train_loader_T2)
             for batch in train_loader:
                 img_t1 = batch['t1']
                 img_t1ce = batch['t1ce']
                 img_t2 = batch['t2']
                 img_flair = batch['flair']
-                #segs = batch['segs']
                 flags = [i[0] for i in batch['flag']]
-                path = batch['path'][0][0]
-                if len(flags)==0:
-                    raise Exception('No available sequence in {}!'.format(path))
 
                 d = img_t1.shape[3]
                 img_t1 = torch.cat([img_t1[:,:,:,i:d-c_in+i+1] for i in range(c_in)], dim=2)[0].permute(2,0,1,3,4)
@@ -98,62 +103,90 @@ def train(args, net, device):
                     rh = random.randint(0, h-nh-1) if h>nh else 0
 
                     inputs = [
-                        img_t1[rd:rd+nd,:,:,rw:rw+nw,rh:rh+nh].to(device=device, dtype=torch.float32),
-                        img_t1ce[rd:rd+nd,:,:,rw:rw+nw,rh:rh+nh].to(device=device, dtype=torch.float32),
-                        img_t2[rd:rd+nd,:,:,rw:rw+nw,rh:rh+nh].to(device=device, dtype=torch.float32),
-                        img_flair[rd:rd+nd,:,:,rw:rw+nw,rh:rh+nh].to(device=device, dtype=torch.float32),
+                        img_t1[rd:rd+nd,:,0,rw:rw+nw,rh:rh+nh].to(device=device, dtype=torch.float32),
+                        img_t1ce[rd:rd+nd,:,0,rw:rw+nw,rh:rh+nh].to(device=device, dtype=torch.float32),
+                        img_t2[rd:rd+nd,:,0,rw:rw+nw,rh:rh+nh].to(device=device, dtype=torch.float32),
+                        img_flair[rd:rd+nd,:,0,rw:rw+nw,rh:rh+nh].to(device=device, dtype=torch.float32),
                     ]
 
-                    random.shuffle(flags)
-                    source_seq = flags[0]
-                    random.shuffle(flags)
-                    target_seq = flags[0]
+                    source_seq = random.choice(flags)
+                    target_seq = [fi for fi in flags if fi!=source_seq][0]
+                    random_seq = random.choice([0,1,2,3])
 
                     source_img = inputs[source_seq]
                     target_img = inputs[target_seq]
 
-                    if torch.abs(torch.mean(source_img) + 1)<1e-8:
-                        continue
-
                     source_code = torch.from_numpy(np.array([1 if i==source_seq else 0 for i in range(c_s)])).reshape((1,c_s)).to(device=device, dtype=torch.float32)
                     target_code = torch.from_numpy(np.array([1 if i==target_seq else 0 for i in range(c_s)])).reshape((1,c_s)).to(device=device, dtype=torch.float32)
+                    random_code = torch.from_numpy(np.array([1 if i==random_seq else 0 for i in range(c_s)])).reshape((1,c_s)).to(device=device, dtype=torch.float32)
                     
-                    output_source = net(source_img, source_code, n_outseq=source_img.shape[1])
-                    output_target = net(source_img, target_code, n_outseq=target_img.shape[1])
-                    output_cyc = net(output_target, source_code, n_outseq=source_img.shape[1])
+                    source_img_aug = random_aug(source_img/2+0.5)*2-1
+                    target_img_aug = random_aug(target_img/2+0.5)*2-1
+
+                    if torch.abs(torch.mean(source_img_aug) + 1)<1e-8 or torch.abs(torch.mean(target_img_aug) + 1)<1e-8 or torch.std(source_img_aug)<1e-8 or torch.std(target_img_aug)<1e-8:
+                        continue
+
+                    if epoch>pretrain_epochs_rand:
+                        random_code = torch.rand_like(random_code) if random.random()>0.5 else random_code
+                        
+                        if random.random()>0.5:
+                            with torch.no_grad():
+                                source_img_aug = net.forward_single(source_img_aug, random_code)[0].detach()
+
+                        rec_src2tgt, rec_tgt2src, rec_src2src, rec_tgt2tgt, rec_rand2src, rec_rand2tgt, c_src, c_tgt, loss_vq = net(source_img_aug, target_img_aug, source_code, target_code, z_sample=True)
+                    else:
+                        rec_src2tgt, rec_tgt2src, rec_src2src, rec_tgt2tgt, c_src, c_tgt, loss_vq = net(source_img_aug, target_img_aug, source_code, target_code)
+                        rec_rand2src = rec_src2src
+                        rec_rand2tgt = rec_tgt2tgt
+
+                    data_range = torch.clamp(torch.max(target_img.max().unsqueeze(0),source_img.max().unsqueeze(0)), min=2)
+                    loss_rec = nn.L1Loss()(rec_src2src, source_img) + nn.L1Loss()(rec_src2tgt, target_img) + \
+                        nn.L1Loss()(rec_tgt2src, source_img) + nn.L1Loss()(rec_tgt2tgt, target_img) + \
+                        nn.L1Loss()(rec_rand2src, source_img) + nn.L1Loss()(rec_rand2tgt, target_img)
+                    loss_ssim = SSIMLoss()(rec_src2src, source_img, data_range) + \
+                        SSIMLoss()(rec_src2tgt, target_img, data_range) + \
+                        SSIMLoss()(rec_tgt2src, source_img, data_range) + \
+                        SSIMLoss()(rec_tgt2tgt, target_img, data_range) + \
+                        SSIMLoss()(rec_rand2src, source_img, data_range) + \
+                        SSIMLoss()(rec_rand2tgt, target_img, data_range)
+                    loss_per = perceptual(rec_src2src/2+0.5, source_img/2+0.5) + perceptual(rec_src2tgt/2+0.5, target_img/2+0.5) + \
+                        perceptual(rec_tgt2src/2+0.5, source_img/2+0.5) + perceptual(rec_tgt2tgt/2+0.5, target_img/2+0.5) + \
+                        perceptual(rec_rand2src/2+0.5, source_img/2+0.5) + perceptual(rec_rand2tgt/2+0.5, target_img/2+0.5)
                     
-                    loss_rec = nn.SmoothL1Loss()(output_target, target_img) + nn.SmoothL1Loss()(output_source, source_img)
-                    loss_cyc = nn.SmoothL1Loss()(output_cyc, source_img)
-                    loss_per = perceptual(output_target[0].reshape(-1,1,nw,nh)/2+0.5, target_img[0].reshape(-1,1,nw,nh)/2+0.5) + \
-                        perceptual(output_source[0].reshape(-1,1,nw,nh)/2+0.5, source_img[0].reshape(-1,1,nw,nh)/2+0.5)
+                    loss_con_mse, loss_con_contrast = net.con_loss(c_src, c_tgt, source_img, target_img, downsample=4)
                     
-                    loss = lambda_rec*loss_rec + lambda_per*loss_per + lambda_cyc*loss_cyc
+                    if epoch>pretrain_epochs_contrast:
+                        loss_con = loss_con_mse + loss_con_contrast
+                    else:
+                        loss_con = loss_con_mse
+                    
+                    loss = lambda_rec*loss_rec + lambda_ssim*loss_ssim + lambda_per*loss_per + lambda_con*loss_con + lambda_vq*loss_vq
                     
                     optimizer.zero_grad()
                     loss.backward()
-                    #torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0, norm_type=2)
                     optimizer.step()
-                    
 
-                    train_losses.append(loss_rec.item())
-                    pbar.set_postfix(**{'rec': loss_rec.item(), 'per': loss_per.item(), 'cyc': loss_cyc.item()})
+                    train_metrics['total'].append(loss.item())
+                    train_metrics['rec'].append(loss_rec.item())
+                    train_metrics['con'].append(loss_con.item())
+                    train_metrics['vq'].append(loss_vq.item())
+                    pbar.set_postfix(**{'vq': loss_vq.item(), 'rec': loss_rec.item(), 'ssim': loss_ssim.item(), 'per': loss_per.item(), 'con': loss_con.item()})
                     pbar.update(1)
 
                     if (total_step % args['train']['vis_steps']) == 0:
                         with torch.no_grad():
-                            output1 = net(source_img, torch.from_numpy(np.array([1 if i==0 else 0 for i in range(c_s)])).reshape((1,c_s)).to(device=device, dtype=torch.float32), n_outseq=1)
-                            output2 = net(source_img, torch.from_numpy(np.array([1 if i==1 else 0 for i in range(c_s)])).reshape((1,c_s)).to(device=device, dtype=torch.float32), n_outseq=1)
-                            output3 = net(source_img, torch.from_numpy(np.array([1 if i==2 else 0 for i in range(c_s)])).reshape((1,c_s)).to(device=device, dtype=torch.float32), n_outseq=1)
-                            output4 = net(source_img, torch.from_numpy(np.array([1 if i==3 else 0 for i in range(c_s)])).reshape((1,c_s)).to(device=device, dtype=torch.float32), n_outseq=1)
+                            output0, _, _, _ = net.forward_single(source_img, torch.from_numpy(np.array([1 if i==0 else 0 for i in range(c_s)])).reshape((1,c_s)).to(device=device, dtype=torch.float32))
+                            output1, _, _, _ = net.forward_single(source_img, torch.from_numpy(np.array([1 if i==1 else 0 for i in range(c_s)])).reshape((1,c_s)).to(device=device, dtype=torch.float32))
+                            output2, _, _, _ = net.forward_single(source_img, torch.from_numpy(np.array([1 if i==2 else 0 for i in range(c_s)])).reshape((1,c_s)).to(device=device, dtype=torch.float32))
+                            output3, _, _, _ = net.forward_single(source_img, torch.from_numpy(np.array([1 if i==3 else 0 for i in range(c_s)])).reshape((1,c_s)).to(device=device, dtype=torch.float32))
                             
-                        view_list = [
-                                [source_img[:,0:1,(c_in-1)//2], output_source[:,0:1,(c_in-1)//2], target_img[:,0:1,(c_in-1)//2], output_target[:,0:1,(c_in-1)//2]],
-                                [inputs[0][:,0:1,(c_in-1)//2], inputs[1][:,0:1,(c_in-1)//2], inputs[2][:,0:1,(c_in-1)//2], inputs[3][:,0:1,(c_in-1)//2]],
-                                [output1[:,0:1,(c_in-1)//2], output2[:,0:1,(c_in-1)//2], output3[:,0:1,(c_in-1)//2], output4[:,0:1,(c_in-1)//2]],
-                            ]
-                        
-                        save_grid_images(view_list, os.path.join(dir_visualize, '{:03d}.jpg'.format(epoch+1)), clip_range=(-1,1), normalize=True)
-                        torch.cuda.empty_cache()
+                            vimage = torch.stack([
+                                source_img, source_img_aug, rec_src2tgt, target_img, target_img, target_img_aug, rec_tgt2src, source_img,
+                                rec_src2src, source_img, rec_tgt2tgt, target_img, rec_rand2src, source_img, rec_rand2tgt, target_img,
+                                inputs[0], output0, inputs[1], output1, inputs[2], output2, inputs[3], output3,
+                                    ], dim=1)[:,:].reshape(-1,1,output1.shape[2],output1.shape[3])
+                            vimage = torch.clamp(vimage, min=-1, max=1)/2+0.5
+                            torchvision.utils.save_image(vimage, os.path.join(dir_visualize, '{}.jpg'.format(epoch)))
                     
                     if (total_step % args['train']['ckpt_steps']) == 0:
                         torch.save(net.state_dict(), os.path.join(dir_checkpoint, 'ckpt_tmp.pth'))
@@ -163,21 +196,17 @@ def train(args, net, device):
                         #torch.save(net.state_dict(), os.path.join(dir_checkpoint, 'ckpt_latest.pth'))
                         return
                 #break
-        
+
         net.eval()
-        valid_psnrs = []
-        torch.cuda.empty_cache()
+        test_psnr = []
         with torch.no_grad():
             for batch in valid_loader:
                 img_t1 = batch['t1']
                 img_t1ce = batch['t1ce']
                 img_t2 = batch['t2']
                 img_flair = batch['flair']
-                #segs = batch['segs']
+                
                 flags = [i[0] for i in batch['flag']]
-                path = batch['path'][0][0]
-                if len(flags)==0:
-                    raise Exception('No available sequence in {}!'.format(path))
 
                 d = img_t1.shape[3]
                 img_t1 = torch.cat([img_t1[:,:,:,i:d-c_in+i+1] for i in range(c_in)], dim=2)[0].permute(2,0,1,3,4)
@@ -193,10 +222,10 @@ def train(args, net, device):
                 rh = (h-nh)//2 if h>nh else 0 #random.randint(0, h-nh-1) if h>nh else 0
 
                 inputs = [
-                    img_t1[rd:rd+nd,:,:,rw:rw+nw,rh:rh+nh].to(device=device, dtype=torch.float32),
-                    img_t1ce[rd:rd+nd,:,:,rw:rw+nw,rh:rh+nh].to(device=device, dtype=torch.float32),
-                    img_t2[rd:rd+nd,:,:,rw:rw+nw,rh:rh+nh].to(device=device, dtype=torch.float32),
-                    img_flair[rd:rd+nd,:,:,rw:rw+nw,rh:rh+nh].to(device=device, dtype=torch.float32),
+                    img_t1[rd:rd+nd,:,0,rw:rw+nw,rh:rh+nh].to(device=device, dtype=torch.float32),
+                    img_t1ce[rd:rd+nd,:,0,rw:rw+nw,rh:rh+nh].to(device=device, dtype=torch.float32),
+                    img_t2[rd:rd+nd,:,0,rw:rw+nw,rh:rh+nh].to(device=device, dtype=torch.float32),
+                    img_flair[rd:rd+nd,:,0,rw:rw+nw,rh:rh+nh].to(device=device, dtype=torch.float32),
                 ]
 
                 for src in flags:
@@ -204,21 +233,20 @@ def train(args, net, device):
                     for tgt in flags:
                         target_img = inputs[tgt]
                         target_code = torch.from_numpy(np.array([1 if i==tgt else 0 for i in range(c_s)])).reshape((1,c_s)).to(device=device, dtype=torch.float32)
-                        output_target = net(source_img, target_code, n_outseq=target_img.shape[1])
-                        psnr = torch_PSNR(output_target, target_img, data_range=2.).item()
-                        valid_psnrs.append(psnr)
+                        output_target, _, _, _ = net.forward_single(source_img, target_code)
+                        psnr = torch_PSNR(target_img, output_target, data_range=2)
+                        test_psnr.append(psnr.item())
                 #break
         
-        valid_psnrs = np.mean(valid_psnrs)
-        train_losses = np.mean(train_losses)
-        recorder.update({'train_loss': train_losses, 'psnr': valid_psnrs})
+        loss = np.mean(test_psnr)
+        recorder.update({'vq': np.mean(train_metrics['vq']), 'rec': np.mean(train_metrics['rec']), 'con': np.mean(train_metrics['con']), 'psnr': np.mean(test_psnr)})
         plotter.send(recorder.call())
-        if best_psnr<valid_psnrs:
-            best_psnr = valid_psnrs
+        if best_psnr<loss:
+            best_psnr = loss
             torch.save(net.state_dict(), os.path.join(dir_checkpoint, 'ckpt_best.pth'))
             with open(os.path.join(dir_checkpoint, 'log.csv'), 'a+') as f:
-                f.write('{},{},{}\n'.format(epoch+1, train_losses, valid_psnrs))
-        #torch.save(net.state_dict(), os.path.join(dir_checkpoint, 'ckpt_latest.pth'))
+                f.write('{},{},{},{},{}\n'.format(epoch+1, np.mean(train_metrics['rec']), np.mean(train_metrics['con']), np.mean(train_metrics['vq']), np.mean(test_psnr)))
+
         torch.cuda.empty_cache()
 
 def get_args():

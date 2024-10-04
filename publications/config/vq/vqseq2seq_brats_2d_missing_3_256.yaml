@@ -1,0 +1,42 @@
+data:
+  image: /root/to/brats/image
+  train: publications/data_list/brats/gen/train.csv
+  valid: publications/data_list/brats/gen/valid.csv
+  test:  publications/data_list/brats/gen/test.csv
+  
+seq2seq:
+  ndims: 2                # 2D model
+  c_s: 64                 # sequence code length
+  c_w: 16                 # hyperconv weight length
+  c_in: 1                 # input channels
+  c_enc: [64, 128, 256]   # channels for encoder
+  k_enc: [7, 3, 3]        # ksize for encoder
+  s_enc: [1, 2, 2]        # strides for encoder
+  nres_enc: 6             # number of resblocks in encoder
+  norm: InstanceNorm      # normalization
+  c_dec: [128, 64, 1]     # channels for decoder
+  k_dec: [3, 3, 7]        # ksize for decoder
+  s_dec: [1, 1, 1]        # strides for decoder
+  nres_dec: 6             # number of resblocks in decoder
+  embed_dim: 3            # vq-vae latent space dim
+  n_embed: 256            # vq-vae cookbook
+  beta: 0.25              # vq-vae beta
+
+train:
+  epochs: 1000
+  pretrain_epochs_contrast: 100
+  pretrain_epochs_rand: 200
+  total_steps: 1000000
+  lr: 1e-4
+  rep_step: 4
+  crop_size: [1, 192, 192]
+  valid_size: [16, 192, 192]
+  lambda_rec: 10
+  lambda_ssim: 1
+  lambda_per: 0.1
+  lambda_con: 10
+  lambda_vq: 10
+  vis_steps: 128
+  ckpt_steps: 1280
+  vis: outputs/vis/vqseq2seq/brats/2d
+  ckpt: outputs/ckpt/vqseq2seq/brats/2d
