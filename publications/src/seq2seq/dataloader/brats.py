@@ -31,7 +31,7 @@ class Dataset_brats(Dataset):
         return len(self.file_X)
     
     def norm(self, arr):
-        """ norm (0, 99%) to (0, 1)
+        """ norm (0, 99%*2) to (-1, 1)
         arr: [s,d,w,h]
         """
         amax = np.percentile(arr, 99) * 2
