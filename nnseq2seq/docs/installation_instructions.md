@@ -10,14 +10,14 @@ Refer to [nnU-Net](https://github.com/MIC-DKFZ/nnUNet/blob/master/documentation/
 
 ## Installation
 ### Create environment and install PyTorch
-Create a virtual environment with Conda.
+Create a virtual environment with Conda. Make sure you install Python>=3.10
 ```sh
-conda create -n nnseq2seq python=3
+conda create -n nnseq2seq python=3.10
 conda activate nnseq2seq
 ```
 
 Install PyTorch as described on their website (conda/pip).
-Select your preferences and run the install command from [here](https://pytorch.org/get-started/locally/) to install the latest version.
+Select your preferences and run the install command from [here](https://pytorch.org/get-started/locally/) to install the latest version. Make sure you install PyTorch>=2.0
 
 For example, run the command as follows,
 ```

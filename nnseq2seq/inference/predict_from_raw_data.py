@@ -67,6 +67,7 @@ class nnSeq2SeqPredictor(object):
             perform_everything_on_device = False
         self.device = device
         self.perform_everything_on_device = perform_everything_on_device
+        self.tsf_weight = None
 
     def initialize_from_trained_model_folder(self, model_training_output_dir: str,
                                              use_folds: Union[Tuple[Union[int, str]], None],
@@ -380,30 +381,8 @@ class nnSeq2SeqPredictor(object):
                     sleep(0.1)
                     proceed = not check_workers_alive_and_busy(export_pool, worker_list, r, allowed_num_queued=2)
                 
-                # segment
-                tgt_code = F.one_hot(torch.from_numpy(np.array([0], dtype=np.int64)),
-                    num_classes=properties['num_channel']).to(self.device, dtype=data.dtype, non_blocking=True)
-                
-                _, prediction_mask, prediction_latent = self.predict_logits_from_preprocessed_data(data, tgt_code, properties=properties)
-                prediction_mask = torch.argmax(prediction_mask, dim=0, keepdim=True).cpu()
-                os.makedirs(os.path.join(ofile, 'multi2one_inference'), exist_ok=True)
-                r.append(
-                    export_pool.starmap_async(
-                        export_prediction_from_logits,
-                        ((prediction_mask, properties, self.configuration_manager, self.plans_manager,
-                        self.dataset_json, os.path.join(ofile, 'multi2one_inference', 'segmentation'), save_probabilities),)
-                    )
-                )
-
-                if not self.segment_only:
-                    os.makedirs(os.path.join(ofile, 'latent_space'), exist_ok=True)
-                    r.append(
-                        export_pool.starmap_async(
-                            export_prediction_from_logits,
-                            ((prediction_latent, properties, self.configuration_manager, self.plans_manager,
-                            self.dataset_json, os.path.join(ofile, 'latent_space', 'latent_space'), save_probabilities, True),)
-                        )
-                    )
+                    
+                if self.infer_input:
                     os.makedirs(os.path.join(ofile, 'normalized_source_images'), exist_ok=True)
                     for src_idx, src_seq in enumerate(properties['available_channel']):
                         r.append(
@@ -414,36 +393,84 @@ class nnSeq2SeqPredictor(object):
                             )
                         )
 
+                if self.infer_translate or self.infer_map:
                     for tgt_seq in range(properties['num_channel']):
-                        tgt_code = F.one_hot(torch.from_numpy(np.array([tgt_seq], dtype=np.int64)),
-                            num_classes=properties['num_channel']).to(self.device, dtype=data.dtype, non_blocking=True)
-                        
-                        prediction, _, _ = self.predict_logits_from_preprocessed_data(data, tgt_code, properties=properties)
+                        if tgt_seq in self.infer_translate_target or 'all' in self.infer_translate_target:
+                            tgt_code = F.one_hot(torch.from_numpy(np.array([tgt_seq], dtype=np.int64)),
+                                num_classes=properties['num_channel']).to(self.device, dtype=data.dtype, non_blocking=True)
+                            
+                            prediction, _, _, _ = self.predict_logits_from_preprocessed_data(data, tgt_code, properties=properties)
+                            if self.infer_translate:
+                                os.makedirs(os.path.join(ofile, 'multi2one_inference'), exist_ok=True)
+                                r.append(
+                                    export_pool.starmap_async(
+                                        export_prediction_from_logits,
+                                        ((prediction, properties, self.configuration_manager, self.plans_manager,
+                                        self.dataset_json, os.path.join(ofile, 'multi2one_inference', 'translate_tgt_{}'.format(tgt_seq)), save_probabilities),)
+                                    )
+                                )
+                            if tgt_seq in properties['available_channel'] and self.infer_map:
+                                tgt_idx = properties['available_channel'].index(tgt_seq)
+                                hm_prediction = linearMatch(prediction, data[tgt_idx:tgt_idx+1])
+                                md = torch.abs(hm_prediction-data[tgt_idx:tgt_idx+1])
+
+                                psnr = torch_PSNR(data[tgt_idx:tgt_idx+1], hm_prediction, data_range=1).item()
+                                ssim = np_SSIM(data[tgt_idx].numpy(), hm_prediction[0].numpy(), data_range=1)
+                                self.one2one_translate_psnr[tgt_seq].append(psnr)
+                                self.one2one_translate_ssim[tgt_seq].append(ssim)
+
+                                os.makedirs(os.path.join(ofile, 'explainability_visualization/imaging_differentiation_map'), exist_ok=True)
+                                r.append(
+                                    export_pool.starmap_async(
+                                        export_prediction_from_logits,
+                                        ((md, properties, self.configuration_manager, self.plans_manager,
+                                        self.dataset_json, os.path.join(ofile, 'explainability_visualization/imaging_differentiation_map', 'imaging_differentiation_map_tgt_{}'.format(tgt_seq)), save_probabilities),)
+                                    )
+                                )
+                else:
+                    tgt_code = F.one_hot(torch.from_numpy(np.array([0], dtype=np.int64)),
+                        num_classes=properties['num_channel']).to(self.device, dtype=data.dtype, non_blocking=True)
+
+
+                if self.infer_segment or self.infer_latent or self.infer_fusion:
+                    # segment
+                    _, prediction_mask, prediction_fusion, prediction_latent = self.predict_logits_from_preprocessed_data(data, tgt_code, properties=properties)
+                    #prediction_mask = torch.argmax(prediction_mask, dim=0, keepdim=True)
+                    
+                    if self.infer_segment:
+                        os.makedirs(os.path.join(ofile, 'multi2one_inference'), exist_ok=True)
                         r.append(
                             export_pool.starmap_async(
                                 export_prediction_from_logits,
-                                ((prediction, properties, self.configuration_manager, self.plans_manager,
-                                self.dataset_json, os.path.join(ofile, 'multi2one_inference', 'translate_tgt_{}'.format(tgt_seq)), save_probabilities),)
+                                ((prediction_mask, properties, self.configuration_manager, self.plans_manager,
+                                self.dataset_json, os.path.join(ofile, 'multi2one_inference', 'segmentation'), save_probabilities, False, True),)
                             )
                         )
-                        if tgt_seq in properties['available_channel']:
-                            tgt_idx = properties['available_channel'].index(tgt_seq)
-                            hm_prediction = linearMatch(prediction, data[tgt_idx:tgt_idx+1])
-                            md = torch.abs(hm_prediction-data[tgt_idx:tgt_idx+1])
-
-                            psnr = torch_PSNR(data[tgt_idx:tgt_idx+1], hm_prediction, data_range=1).item()
-                            ssim = np_SSIM(data[tgt_idx].numpy(), hm_prediction[0].numpy(), data_range=1)
-                            self.one2one_translate_psnr[tgt_seq].append(psnr)
-                            self.one2one_translate_ssim[tgt_seq].append(ssim)
-
-                            os.makedirs(os.path.join(ofile, 'explainability_visualization/imaging_differentiation_map'), exist_ok=True)
-                            r.append(
-                                export_pool.starmap_async(
-                                    export_prediction_from_logits,
-                                    ((md, properties, self.configuration_manager, self.plans_manager,
-                                    self.dataset_json, os.path.join(ofile, 'explainability_visualization/imaging_differentiation_map', 'imaging_differentiation_map_tgt_{}'.format(tgt_seq)), save_probabilities),)
-                                )
+                    
+                    if self.infer_fusion:
+                        os.makedirs(os.path.join(ofile, 'multi2one_inference'), exist_ok=True)
+                        r.append(
+                            export_pool.starmap_async(
+                                export_prediction_from_logits,
+                                ((prediction_fusion, properties, self.configuration_manager, self.plans_manager,
+                                self.dataset_json, os.path.join(ofile, 'multi2one_inference', 'fusion'), save_probabilities),)
                             )
+                        )
+
+                    if self.infer_latent:
+                        os.makedirs(os.path.join(ofile, 'latent_space'), exist_ok=True)
+                        for i, p in enumerate(prediction_latent):
+                            if i in self.infer_latent_level or 'all' in self.infer_latent_level:
+                                p = F.interpolate(p.unsqueeze(0).to(dtype=torch.float32),
+                                                  scale_factor=(1, 0.5**(len(prediction_latent)-i-1), 0.5**(len(prediction_latent)-i-1)) if self.network.ndim==2 else 0.5**(len(prediction_latent)-i-1),
+                                                  mode='trilinear')[0]
+                                r.append(
+                                    export_pool.starmap_async(
+                                        export_prediction_from_logits,
+                                        ((p, properties, self.configuration_manager, self.plans_manager,
+                                        self.dataset_json, os.path.join(ofile, 'latent_space', 'latent_space_{}'.format(i)), save_probabilities, True),)
+                                    )
+                                )
 
                         # for src_idx, src_seq in enumerate(properties['available_channel']):
                         #     prediction, prediction_mask, prediction_latent = self.predict_logits_from_preprocessed_data(data[src_idx:src_idx+1], tgt_code)
@@ -580,9 +607,10 @@ class nnSeq2SeqPredictor(object):
 
         if self.verbose:
             print('predicting')
-        predicted_logits, predicted_mask_logits, predicted_latent_space = self.predict_logits_from_preprocessed_data(dct['data'])
+        predicted_logits, predicted_mask_logits, predicted_fusion_logits, predicted_latent_space = self.predict_logits_from_preprocessed_data(dct['data'])
         predicted_logits = predicted_logits.cpu()
         predicted_mask_logits = predicted_mask_logits.cpu()
+        predicted_fusion_logits = predicted_fusion_logits.cpu()
         predicted_latent_space = predicted_latent_space.cpu()
 
         if self.verbose:
@@ -616,6 +644,7 @@ class nnSeq2SeqPredictor(object):
         with torch.no_grad():
             prediction = None
             prediction_mask = None
+            prediction_fusion = None
             prediction_latent = None
 
             for params in self.list_of_parameters:
@@ -630,27 +659,64 @@ class nnSeq2SeqPredictor(object):
                 # second iteration to crash due to OOM. Grabbing that with try except cause way more bloated code than
                 # this actually saves computation time
                 if prediction is None:
-                    prediction, prediction_mask, prediction_latent = self.predict_sliding_window_return_logits(data, target_code, properties)
+                    prediction, prediction_mask, prediction_fusion, prediction_latent = self.predict_sliding_window_return_logits(data, target_code, properties)
                     prediction = prediction.to('cpu')
                     prediction_mask = prediction_mask.to('cpu')
-                    prediction_latent = prediction_latent.to('cpu')
+                    prediction_fusion = prediction_fusion.to('cpu')
+                    prediction_latent = [p.to('cpu') for p in prediction_latent]
                 else:
-                    pred, pred_mask, pred_latent = self.predict_sliding_window_return_logits(data, target_code, properties)
+                    pred, pred_mask, pred_fusion, pred_latent = self.predict_sliding_window_return_logits(data, target_code, properties)
                     prediction += pred.to('cpu')
                     prediction_mask += pred_mask.to('cpu')
-                    prediction_latent += pred_latent.to('cpu')
+                    prediction_fusion += pred_fusion.to('cpu')
+                    for i, p in enumerate(pred_latent):
+                        prediction_latent[i] += p.to('cpu')
 
             if len(self.list_of_parameters) > 1:
                 prediction /= len(self.list_of_parameters)
                 prediction_mask /= len(self.list_of_parameters)
-                prediction_latent /= len(self.list_of_parameters)
+                prediction_fusion /= len(self.list_of_parameters)
+                prediction_latent = [p/len(self.list_of_parameters) for p in prediction_latent]
 
             if self.verbose: print('Prediction done')
             prediction = prediction.to('cpu')
             prediction_mask = prediction_mask.to('cpu')
-            prediction_latent = prediction_latent.to('cpu')
+            prediction_fusion = prediction_fusion.to('cpu')
+            prediction_latent = [p.to('cpu') for p in prediction_latent]
         torch.set_num_threads(n_threads)
-        return prediction, prediction_mask, prediction_latent
+        return prediction, prediction_mask, prediction_fusion, prediction_latent
+    
+    def predict_logits_from_latents(self, latent: torch.Tensor, target_code: torch.Tensor, latent_focal: str='dispersion') -> torch.Tensor:
+        n_threads = torch.get_num_threads()
+        torch.set_num_threads(8 if 8 < n_threads else n_threads)
+        with torch.no_grad():
+            prediction = None
+
+            for params in self.list_of_parameters:
+
+                # messing with state dict names...
+                if not isinstance(self.network, OptimizedModule):
+                    self.network.load_state_dict(params)
+                else:
+                    self.network._orig_mod.load_state_dict(params)
+
+                # why not leave prediction on device if perform_everything_on_device? Because this may cause the
+                # second iteration to crash due to OOM. Grabbing that with try except cause way more bloated code than
+                # this actually saves computation time
+                if prediction is None:
+                    prediction = self.decode_sliding_window_return_logits(latent, target_code, latent_focal)
+                    prediction = prediction.to('cpu')
+                else:
+                    pred, pred_mask = self.decode_sliding_window_return_logits(latent, target_code, latent_focal)
+                    prediction += pred.to('cpu')
+
+            if len(self.list_of_parameters) > 1:
+                prediction /= len(self.list_of_parameters)
+
+            if self.verbose: print('Prediction done')
+            prediction = prediction.to('cpu')
+        torch.set_num_threads(n_threads)
+        return prediction
 
     def _internal_get_sliding_window_slicers(self, image_size: Tuple[int, ...]):
         slicers = []
@@ -697,9 +763,11 @@ class nnSeq2SeqPredictor(object):
         target_code_int = torch.argmax(target_code, dim=1)
         src_code = torch.from_numpy(np.array([1 if i in properties['available_channel'] and (i!=target_code_int or len(properties['available_channel'])==1) else 0 for i in range(properties['num_channel'])])).unsqueeze(0).to(self.device, dtype=target_code.dtype, non_blocking=True)
         src_all_code = torch.from_numpy(np.array([1 if i in properties['available_channel'] else 0 for i in range(properties['num_channel'])])).unsqueeze(0).to(self.device, dtype=target_code.dtype, non_blocking=True)
-        
+
         weight_all = self.network.image_encoder.latent_fusion(src_all_code)*src_all_code
+        weight_all /= (torch.sum(weight_all, dim=1) + 1e-5)
         weight_sub = self.network.image_encoder.latent_fusion(src_code)*src_code
+        weight_sub /= (torch.sum(weight_sub, dim=1) + 1e-5)
         tsf_record = src_all_code.squeeze().detach().cpu().numpy().tolist()+weight_all.squeeze().detach().cpu().numpy().tolist()
         if tsf_record not in self.tsf_weight:
             self.tsf_weight.append(tsf_record)
@@ -707,11 +775,12 @@ class nnSeq2SeqPredictor(object):
         if tsf_record not in self.tsf_weight:
             self.tsf_weight.append(tsf_record)
 
-        output_src2tgt_sub, latent_src_all = self.network.infer(data, src_all_code, src_code, target_code)
-        mask_src_all = self.network.segmentor(latent_src_all)
+        output_src2tgt_sub, latent_src_all, latent_src_all_seg, fusion_src_all = self.network.infer(data, src_all_code, src_code, target_code)
+        mask_src_all = self.network.segmentor(latent_src_all_seg)
         prediction = output_src2tgt_sub
-        prediction_mask = mask_src_all[0]
-        latent_space = latent_src_all[-1]
+        prediction_mask = mask_src_all
+        prediction_fusion = fusion_src_all
+        latent_space = [F.interpolate(p, size=latent_src_all[-1].shape[2:]) for p in latent_src_all]
             
 
         if mirror_axes is not None:
@@ -723,19 +792,48 @@ class nnSeq2SeqPredictor(object):
                 c for i in range(len(mirror_axes)) for c in itertools.combinations([m + 2 for m in mirror_axes], i + 1)
             ]
             for axes in axes_combinations:
-                output_src2tgt_sub, latent_src_all = self.network.infer(torch.flip(x, (*axes,)), src_all_code, src_code, target_code)
-                mask_src_all = self.network.segmentor(latent_src_all)
+                output_src2tgt_sub, latent_src_all, latent_src_all_seg, fusion_src_all = self.network.infer(torch.flip(data, (*axes,)), src_all_code, src_code, target_code)
+                mask_src_all = self.network.segmentor(latent_src_all_seg)
                 pred = output_src2tgt_sub
-                pred_mask = mask_src_all[0]
-                latent = latent_src_all[0]
+                pred_mask = mask_src_all
+                latent = [F.interpolate(p, size=latent_src_all[-1].shape[2:]) for p in latent_src_all]
                     
                 prediction += torch.flip(pred, (*axes,))
                 prediction_mask += torch.flip(pred_mask, (*axes,))
-                latent_space += torch.flip(latent, (*axes,))
+                prediction_fusion += torch.flip(fusion_src_all, (*axes,))
+                for i, p in enumerate(latent):
+                    latent_space[i] += torch.flip(p, (*axes,))
             prediction /= (len(axes_combinations) + 1)
             prediction_mask /= (len(axes_combinations) + 1)
-            latent_space /= (len(axes_combinations) + 1)
-        return prediction, prediction_mask, latent_space
+            prediction_fusion /= (len(axes_combinations) + 1)
+            latent_space = [p/(len(axes_combinations) + 1) for p in latent_space]
+        return prediction, prediction_mask, prediction_fusion, latent_space
+    
+    def _internal_maybe_mirror_and_decode(self, x: List[torch.Tensor], target_code: torch.Tensor, latent_focal: str='dispersion') -> torch.Tensor:
+        mirror_axes = self.allowed_mirroring_axes if self.use_mirroring else None
+        
+        for latent_id, latent_tensor in enumerate(x):
+            x[latent_id] = F.interpolate(latent_tensor.to(dtype=torch.float32),
+                                         scale_factor=0.5**(len(x)-latent_id-1),
+                                         mode='nearest')
+        
+        prediction, _ = self.network.hyper_decoder(x, target_code, latent_focal=latent_focal)
+            
+
+        if mirror_axes is not None:
+            # check for invalid numbers in mirror_axes
+            # x should be 5d for 3d images and 4d for 2d. so the max value of mirror_axes cannot exceed len(x.shape) - 3
+            assert max(mirror_axes) <= x[-1].ndim - 3, 'mirror_axes does not match the dimension of the input!'
+
+            axes_combinations = [
+                c for i in range(len(mirror_axes)) for c in itertools.combinations([m + 2 for m in mirror_axes], i + 1)
+            ]
+            for axes in axes_combinations:
+                pred, _ = self.network.hyper_decoder([torch.flip(xi, (*axes,)) for xi in x], target_code, latent_focal=latent_focal)
+                
+                prediction += torch.flip(pred, (*axes,))
+            prediction /= (len(axes_combinations) + 1)
+        return prediction
 
     def _internal_predict_sliding_window_return_logits(self,
                                                        data: torch.Tensor,
@@ -764,9 +862,12 @@ class nnSeq2SeqPredictor(object):
             predicted_mask_logits = torch.zeros((self.label_manager.num_segmentation_heads, *data.shape[1:]),
                                            dtype=torch.half,
                                            device=results_device)
-            predicted_latent_space = torch.zeros((self.network.image_encoder.latent_space_dim, *data.shape[1:]),
+            predicted_fusion_logits = torch.zeros((3, *data.shape[1:]),
                                            dtype=torch.half,
                                            device=results_device)
+            predicted_latent_space = [
+                torch.zeros((self.network.image_encoder.latent_space_dim, *data.shape[1:]),
+                    dtype=torch.half, device=results_device) for _ in range(len(self.network.image_encoder.s_enc))]
             n_predictions = torch.zeros(data.shape[1:], dtype=torch.half, device=results_device)
             if self.use_gaussian:
                 gaussian = compute_gaussian(tuple(self.configuration_manager.patch_size), sigma_scale=1. / 8,
@@ -779,31 +880,99 @@ class nnSeq2SeqPredictor(object):
                 workon = data[sl][None]
                 workon = workon.to(self.device, non_blocking=False)
 
-                prediction, prediction_mask, latent_space = self._internal_maybe_mirror_and_predict(workon, target_code, properties)
+                prediction, prediction_mask, prediction_fusion, latent_space = self._internal_maybe_mirror_and_predict(workon, target_code, properties)
                 prediction = prediction[0].to(results_device)
                 prediction_mask = prediction_mask[0].to(results_device)
-                latent_space = latent_space[0].to(results_device)
+                prediction_fusion = prediction_fusion[0].to(results_device)
+                
+                for i, p in enumerate(latent_space):
+                    p = p.to(results_device)
+                    predicted_latent_space[i][sl] += (p[0] * gaussian if self.use_gaussian else p)
 
                 predicted_logits[sl] += (prediction * gaussian if self.use_gaussian else prediction)
                 predicted_mask_logits[sl] += (prediction_mask * gaussian if self.use_gaussian else prediction_mask)
-                predicted_latent_space[sl] += (latent_space * gaussian if self.use_gaussian else latent_space)
+                predicted_fusion_logits[sl] += (prediction_fusion * gaussian if self.use_gaussian else prediction_fusion)
                 n_predictions[sl[1:]] += (gaussian if self.use_gaussian else 1)
                 
 
             predicted_logits /= n_predictions
             predicted_mask_logits /= n_predictions
-            predicted_latent_space /= n_predictions
+            predicted_fusion_logits /= n_predictions
+            predicted_latent_space = [p/n_predictions for p in predicted_latent_space]
+              
             # check for infs
             if torch.any(torch.isinf(predicted_logits)):
                 raise RuntimeError('Encountered inf in predicted array. Aborting... If this problem persists, '
                                    'reduce value_scaling_factor in compute_gaussian or increase the dtype of '
                                    'predicted_logits to fp32')
         except Exception as e:
-            del predicted_logits, n_predictions, prediction, prediction_mask, latent_space, gaussian, workon
+            del predicted_logits, n_predictions, prediction, prediction_mask, prediction_fusion, latent_space, gaussian, workon
             empty_cache(self.device)
             empty_cache(results_device)
             raise e
-        return predicted_logits, predicted_mask_logits, predicted_latent_space
+        return predicted_logits, predicted_mask_logits, predicted_fusion_logits, predicted_latent_space
+    
+    def _internal_decode_sliding_window_return_logits(self,
+                                                       latents: List[torch.Tensor],
+                                                       slicers,
+                                                       target_code: torch.Tensor,
+                                                       do_on_device: bool = True,
+                                                       latent_focal: str='dispersion',
+                                                       ):
+        predicted_logits = n_predictions = prediction = gaussian = workon = None
+        results_device = self.device if do_on_device else torch.device('cpu')
+
+        try:
+            empty_cache(self.device)
+
+            # move data to device
+            if self.verbose:
+                print(f'move image to device {results_device}')
+            for latent_id, latent_tensor in enumerate(latents):
+                latents[latent_id] = latent_tensor.to(results_device)
+
+            # preallocate arrays
+            if self.verbose:
+                print(f'preallocating results arrays on device {results_device}')
+            predicted_logits = torch.zeros((1, *latents[-1].shape[1:]),
+                                           dtype=torch.half,
+                                           device=results_device)
+            
+            n_predictions = torch.zeros(latents[-1].shape[1:], dtype=torch.half, device=results_device)
+            if self.use_gaussian:
+                gaussian = compute_gaussian(tuple(self.configuration_manager.patch_size), sigma_scale=1. / 8,
+                                            value_scaling_factor=10,
+                                            device=results_device)
+
+            if self.verbose: print('running prediction')
+            if not self.allow_tqdm and self.verbose: print(f'{len(slicers)} steps')
+            for sl in tqdm(slicers, disable=not self.allow_tqdm):
+                workons = []
+                for latent_tensor in latents:
+                    workon = latent_tensor[sl][None]
+                    workon = workon.to(self.device, non_blocking=False)
+                    workons.append(workon)
+
+                prediction = self._internal_maybe_mirror_and_decode(workons, target_code, latent_focal)
+                prediction = prediction[0].to(results_device)
+
+                predicted_logits[sl] += (prediction * gaussian if self.use_gaussian else prediction)
+                n_predictions[sl[1:]] += (gaussian if self.use_gaussian else 1)
+                
+
+            predicted_logits /= n_predictions
+              
+            # check for infs
+            if torch.any(torch.isinf(predicted_logits)):
+                raise RuntimeError('Encountered inf in predicted array. Aborting... If this problem persists, '
+                                   'reduce value_scaling_factor in compute_gaussian or increase the dtype of '
+                                   'predicted_logits to fp32')
+        except Exception as e:
+            del predicted_logits, n_predictions, prediction, gaussian, workon
+            empty_cache(self.device)
+            empty_cache(results_device)
+            raise e
+        return predicted_logits
 
     def predict_sliding_window_return_logits(self, input_image: torch.Tensor, target_code: torch.Tensor, properties=None) \
             -> Union[np.ndarray, torch.Tensor]:
@@ -837,23 +1006,81 @@ class nnSeq2SeqPredictor(object):
                 if self.perform_everything_on_device and self.device != 'cpu':
                     # we need to try except here because we can run OOM in which case we need to fall back to CPU as a results device
                     try:
-                        predicted_logits, predicted_mask_logits, predicted_latent_space = self._internal_predict_sliding_window_return_logits(data, slicers, target_code,
+                        predicted_logits, predicted_mask_logits, predicted_fusion_logits, predicted_latent_space = self._internal_predict_sliding_window_return_logits(data, slicers, target_code,
                                                                                                self.perform_everything_on_device, properties)
                     except RuntimeError:
                         print(
                             'Prediction on device was unsuccessful, probably due to a lack of memory. Moving results arrays to CPU')
                         empty_cache(self.device)
-                        predicted_logits, predicted_mask_logits, predicted_latent_space = self._internal_predict_sliding_window_return_logits(data, slicers, target_code, False, properties)
+                        predicted_logits, predicted_mask_logits, predicted_fusion_logits, predicted_latent_space = self._internal_predict_sliding_window_return_logits(data, slicers, target_code, False, properties)
                 else:
-                    predicted_logits, predicted_mask_logits, predicted_latent_space = self._internal_predict_sliding_window_return_logits(data, slicers, target_code,
+                    predicted_logits, predicted_mask_logits, predicted_fusion_logits, predicted_latent_space = self._internal_predict_sliding_window_return_logits(data, slicers, target_code,
                                                                                            self.perform_everything_on_device, properties)
 
                 empty_cache(self.device)
                 # revert padding
                 predicted_logits = predicted_logits[tuple([slice(None), *slicer_revert_padding[1:]])]
                 predicted_mask_logits = predicted_mask_logits[tuple([slice(None), *slicer_revert_padding[1:]])]
-                predicted_latent_space = predicted_latent_space[tuple([slice(None), *slicer_revert_padding[1:]])]
-        return predicted_logits, predicted_mask_logits, predicted_latent_space
+                predicted_fusion_logits = predicted_fusion_logits[tuple([slice(None), *slicer_revert_padding[1:]])]
+                predicted_latent_space = [p[tuple([slice(None), *slicer_revert_padding[1:]])] for p in predicted_latent_space]
+        return predicted_logits, predicted_mask_logits, predicted_fusion_logits, predicted_latent_space
+    
+    def decode_sliding_window_return_logits(self, input_latent: List[torch.Tensor], target_code: torch.Tensor, latent_focal: str='dispersion') \
+            -> Union[np.ndarray, torch.Tensor]:
+        assert isinstance(input_latent, List)
+        self.network = self.network.to(self.device)
+        self.network.eval()
+
+        empty_cache(self.device)
+
+        # Autocast can be annoying
+        # If the device_type is 'cpu' then it's slow as heck on some CPUs (no auto bfloat16 support detection)
+        # and needs to be disabled.
+        # If the device_type is 'mps' then it will complain that mps is not implemented, even if enabled=False
+        # is set. Whyyyyyyy. (this is why we don't make use of enabled=False)
+        # So autocast will only be active if we have a cuda device.
+        with torch.no_grad():
+            with torch.autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
+                assert len(input_latent)==5, 'input_latent must be a List of length 5'
+                assert input_latent[-1].ndim == 4, 'input_latent[-1] must be a 4D np.ndarray or torch.Tensor (c, x, y, z)'
+
+                if self.verbose: print(f'Input latent shape: {input_latent[-1].shape}')
+                if self.verbose: print("step_size:", self.tile_step_size)
+                if self.verbose: print("mirror_axes:", self.allowed_mirroring_axes if self.use_mirroring else None)
+
+                latents = []
+                for latent_id, latent_tensor in enumerate(input_latent):
+                    input_latent[latent_id] = F.interpolate(latent_tensor.unsqueeze(0).to(dtype=torch.float32),
+                                                            scale_factor=(1, 2**(len(input_latent)-latent_id-1), 2**(len(input_latent)-latent_id-1)) if self.network.ndim==2 else 2**(len(input_latent)-latent_id-1),
+                                                            mode='nearest')[0]
+
+                    # if input_image is smaller than tile_size we need to pad it to tile_size.
+                    data, slicer_revert_padding = pad_nd_image(input_latent[latent_id], self.configuration_manager.patch_size,
+                                                            'constant', {'value': 0}, True,
+                                                            None)
+                    
+                    latents.append(data)
+
+                slicers = self._internal_get_sliding_window_slicers(latents[-1].shape[1:])
+
+                if self.perform_everything_on_device and self.device != 'cpu':
+                    # we need to try except here because we can run OOM in which case we need to fall back to CPU as a results device
+                    try:
+                        predicted_logits = self._internal_decode_sliding_window_return_logits(latents, slicers, target_code,
+                                                                                               self.perform_everything_on_device, latent_focal)
+                    except RuntimeError:
+                        print(
+                            'Prediction on device was unsuccessful, probably due to a lack of memory. Moving results arrays to CPU')
+                        empty_cache(self.device)
+                        predicted_logits = self._internal_decode_sliding_window_return_logits(latents, slicers, target_code, False, latent_focal)
+                else:
+                    predicted_logits = self._internal_decode_sliding_window_return_logits(latents, slicers, target_code,
+                                                                                           self.perform_everything_on_device, latent_focal)
+
+                empty_cache(self.device)
+                # revert padding
+                predicted_logits = predicted_logits[tuple([slice(None), *slicer_revert_padding[1:]])]
+        return predicted_logits
 
 
 def predict_entry_point_modelfolder():
@@ -1016,8 +1243,26 @@ def predict_entry_point():
     parser.add_argument('--disable_progress_bar', action='store_true', required=False, default=False,
                         help='Set this flag to disable progress bar. Recommended for HPC environments (non interactive '
                              'jobs)')
-    parser.add_argument('--segment_only', action='store_true', required=False, default=False,
-                        help='Only do segmentation task.')
+    parser.add_argument('--infer_input', action='store_true', required=False, default=False,
+                        help='Infer input.')
+    parser.add_argument('--infer_segment', action='store_true', required=False, default=False,
+                        help='Infer segmentation.')
+    parser.add_argument('--infer_translate', action='store_true', required=False, default=False,
+                        help='Infer translation.')
+    parser.add_argument('--infer_fusion', action='store_true', required=False, default=False,
+                        help='Infer fusion.')
+    parser.add_argument('--infer_latent', action='store_true', required=False, default=False,
+                        help='Infer latent.')
+    parser.add_argument('--infer_map', action='store_true', required=False, default=False,
+                        help='Infer map.')
+    parser.add_argument('--infer_all', action='store_true', required=False, default=False,
+                        help='Infer all.')
+    parser.add_argument('-infer_translate_target', nargs='+', type=str, required=False, default='all',
+                        help='Specify the target sequence that should be predicted. '
+                             'Default: all, could be (0, 1, 2, 3, 4)')
+    parser.add_argument('-infer_latent_level', nargs='+', type=str, required=False, default='all',
+                        help='Specify the latent level that should be predicted. '
+                             'Default: all, could be (0, 1, 2, 3, 4)')
 
     print(
         "\n#######################################################################\nPlease cite the following paper "
@@ -1032,6 +1277,8 @@ def predict_entry_point():
 
     args = parser.parse_args()
     args.f = [i if i == 'all' else int(i) for i in args.f]
+    args.infer_translate_target = [args.infer_translate_target] if args.infer_translate_target == 'all' else [int(i) for i in args.infer_translate_target]
+    args.infer_latent_level = [args.infer_latent_level] if args.infer_latent_level == 'all' else [int(i) for i in args.infer_latent_level]
 
     model_folder = get_output_folder(args.d, args.tr, args.p, args.c)
 
@@ -1069,7 +1316,22 @@ def predict_entry_point():
         args.f,
         checkpoint_name=args.chk
     )
-    predictor.segment_only = args.segment_only
+    predictor.infer_translate_target = args.infer_translate_target
+    predictor.infer_latent_level = args.infer_latent_level
+    if args.infer_all:
+        predictor.infer_input = True
+        predictor.infer_segment = True
+        predictor.infer_translate = True
+        predictor.infer_fusion = True
+        predictor.infer_latent = True
+        predictor.infer_map = True
+    else:
+        predictor.infer_input = args.infer_input
+        predictor.infer_segment = args.infer_segment
+        predictor.infer_translate = args.infer_translate
+        predictor.infer_fusion = args.infer_fusion
+        predictor.infer_latent = args.infer_latent
+        predictor.infer_map = args.infer_map
     predictor.predict_from_files(args.i, args.o, save_probabilities=args.save_probabilities,
                                  overwrite=not args.continue_prediction,
                                  num_processes_preprocessing=args.npp,

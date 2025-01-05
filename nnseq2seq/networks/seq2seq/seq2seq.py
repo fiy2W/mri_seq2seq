@@ -19,7 +19,7 @@ from nnseq2seq.networks.seq2seq.model3d.discriminator import NLayerDiscriminator
 class Seq2Seq2d(nn.Module):
     def __init__(self, args):
         super().__init__()
-        
+        self.ndim = 2
         self.image_encoder = ImageEncoder2d(args['image_encoder'])
         self.hyper_decoder = HyperImageDecoder2d(args['image_decoder'])
         self.segmentor = Segmentor2d(args['segmentor'])
@@ -27,19 +27,20 @@ class Seq2Seq2d(nn.Module):
 
         self.init()
     
-    def forward(self, x_src, domain_src_all, domain_src_subgroup, domain_tgt, with_latent=False):
-        z_all, z_subgroup, vq_loss = self.image_encoder(x_src, domain_src_all, domain_src_subgroup)
-        outputs_all = self.hyper_decoder(z_all, domain_tgt)
-        outputs_subgroup = self.hyper_decoder(z_subgroup, domain_tgt)
+    def forward(self, x_src, domain_src_all, domain_src_subgroup, domain_tgt, with_latent=False, latent_focal=None):
+        z_all, z_subgroup, z_all_seg, z_subgroup_seg, vq_loss = self.image_encoder(x_src, domain_src_all, domain_src_subgroup)
+        outputs_all, fusion_all = self.hyper_decoder(z_all, domain_tgt, latent_focal=latent_focal)
+        outputs_subgroup, fusion_subgroup = self.hyper_decoder(z_subgroup, domain_tgt, latent_focal=latent_focal)
         if with_latent:
-            return outputs_all, outputs_subgroup, z_all, z_subgroup, vq_loss
+            return outputs_all, outputs_subgroup, z_all, z_subgroup, z_all_seg, z_subgroup_seg, vq_loss, fusion_all, fusion_subgroup
         else:
-            return outputs_all, outputs_subgroup
+            return outputs_all, outputs_subgroup, fusion_all, fusion_subgroup
     
     def infer(self, x_src, domain_src_all, domain_src_subgroup, domain_tgt):
-        z_all, z_subgroup, _ = self.image_encoder(x_src, domain_src_all, domain_src_subgroup)
-        outputs_subgroup = self.hyper_decoder(z_subgroup, domain_tgt)
-        return outputs_subgroup, z_all
+        z_all, z_subgroup, z_all_seg, z_subgroup_seg, _ = self.image_encoder(x_src, domain_src_all, domain_src_subgroup)
+        outputs_subgroup, _ = self.hyper_decoder(z_subgroup, domain_tgt, latent_focal='dispersion' if self.hyper_decoder.focal_mode=='focal_mix' else None)
+        fusion_all = self.hyper_decoder.image_fusion(z_all[-1].detach())
+        return outputs_subgroup, z_all, z_all_seg, fusion_all
     
     def init(self):
         for m in self.modules():
@@ -100,7 +101,7 @@ class Seq2Seq2d(nn.Module):
 class Seq2Seq3d(nn.Module):
     def __init__(self, args):
         super().__init__()
-        
+        self.ndim = 3
         self.image_encoder = ImageEncoder3d(args['image_encoder'])
         self.hyper_decoder = HyperImageDecoder3d(args['image_decoder'])
         self.segmentor = Segmentor3d(args['segmentor'])
@@ -108,19 +109,20 @@ class Seq2Seq3d(nn.Module):
         
         self.init()
     
-    def forward(self, x_src, domain_src_all, domain_src_subgroup, domain_tgt, with_latent=False):
-        z_all, z_subgroup, vq_loss = self.image_encoder(x_src, domain_src_all, domain_src_subgroup)
-        outputs_all = self.hyper_decoder(z_all, domain_tgt)
-        outputs_subgroup = self.hyper_decoder(z_subgroup, domain_tgt)
+    def forward(self, x_src, domain_src_all, domain_src_subgroup, domain_tgt, with_latent=False, latent_focal=None):
+        z_all, z_subgroup, z_all_seg, z_subgroup_seg, vq_loss = self.image_encoder(x_src, domain_src_all, domain_src_subgroup)
+        outputs_all, fusion_all = self.hyper_decoder(z_all, domain_tgt, latent_focal=latent_focal)
+        outputs_subgroup, fusion_subgroup = self.hyper_decoder(z_subgroup, domain_tgt, latent_focal=latent_focal)
         if with_latent:
-            return outputs_all, outputs_subgroup, z_all, z_subgroup, vq_loss
+            return outputs_all, outputs_subgroup, z_all, z_subgroup, z_all_seg, z_subgroup_seg, vq_loss, fusion_all, fusion_subgroup
         else:
-            return outputs_all, outputs_subgroup
+            return outputs_all, outputs_subgroup, fusion_all, fusion_subgroup
     
     def infer(self, x_src, domain_src_all, domain_src_subgroup, domain_tgt):
-        z_all, z_subgroup, _ = self.image_encoder(x_src, domain_src_all, domain_src_subgroup)
-        outputs_subgroup = self.hyper_decoder(z_subgroup, domain_tgt)
-        return outputs_subgroup, z_all
+        z_all, z_subgroup, z_all_seg, z_subgroup_seg, _ = self.image_encoder(x_src, domain_src_all, domain_src_subgroup)
+        outputs_subgroup, _ = self.hyper_decoder(z_subgroup, domain_tgt, latent_focal='dispersion' if self.hyper_decoder.focal_mode=='focal_mix' else None)
+        fusion_all = self.hyper_decoder.image_fusion(z_all[-1].detach())
+        return outputs_subgroup, z_all, z_all_seg, fusion_all
     
     def init(self):
         for m in self.modules():

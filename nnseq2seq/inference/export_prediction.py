@@ -18,7 +18,8 @@ def convert_predicted_logits_to_segmentation_with_correct_shape(predicted_logits
                                                                 properties_dict: dict,
                                                                 return_probabilities: bool = False,
                                                                 num_threads_torch: int = 8,
-                                                                latent_space: bool = False):
+                                                                latent_space: bool = False,
+                                                                is_segmentation: bool = False):
     old_threads = torch.get_num_threads()
     torch.set_num_threads(num_threads_torch)
 
@@ -37,23 +38,37 @@ def convert_predicted_logits_to_segmentation_with_correct_shape(predicted_logits
         #predicted_probabilities = label_manager.apply_inference_nonlin(predicted_logits)
         #del predicted_logits
         #segmentation = label_manager.convert_probabilities_to_segmentation(predicted_probabilities)
-        segmentation = np.clip(predicted_logits, a_min=0, a_max=None)
+        if not is_segmentation:
+            segmentation = np.clip(predicted_logits, a_min=0, a_max=None)
+        else:
+            segmentation = label_manager.convert_probabilities_to_segmentation(predicted_logits)
+            segmentation = np.expand_dims(segmentation, axis=0)
     else:
         segmentation = predicted_logits
+
 
     # segmentation may be torch.Tensor but we continue with numpy
     if isinstance(segmentation, torch.Tensor):
         segmentation = segmentation.cpu().numpy()
 
     if not latent_space:
-        # put segmentation in bbox (revert cropping)
-        segmentation_reverted_cropping = np.zeros(properties_dict['shape_before_cropping'])
-        slicer = bounding_box_to_slice(properties_dict['bbox_used_for_cropping'])
-        segmentation_reverted_cropping[slicer] = segmentation
+        output_results = []
+        for channel_i in range(segmentation.shape[0]):
+            # put segmentation in bbox (revert cropping)
+            segmentation_reverted_cropping = np.zeros(properties_dict['shape_before_cropping'])
+            slicer = bounding_box_to_slice(properties_dict['bbox_used_for_cropping'])
+            segmentation_reverted_cropping[slicer] = segmentation[channel_i:channel_i+1]
+            
+            # revert transpose
+            segmentation_reverted_cropping = segmentation_reverted_cropping.transpose(plans_manager.transpose_backward)
+            output_results.append(segmentation_reverted_cropping)
+        
         del segmentation
 
-        # revert transpose
-        segmentation_reverted_cropping = segmentation_reverted_cropping.transpose(plans_manager.transpose_backward)
+        if len(output_results)==1:
+            segmentation_reverted_cropping = output_results[0]
+        else:
+            segmentation_reverted_cropping = np.stack(output_results, axis=0)
     else:
         segmentation_reverted_cropping = segmentation
 
@@ -86,6 +101,7 @@ def export_prediction_from_logits(predicted_array_or_file: Union[np.ndarray, tor
                                   dataset_json_dict_or_file: Union[dict, str], output_file_truncated: str,
                                   save_probabilities: bool = False,
                                   latent_space: bool = False,
+                                  is_segmentation: bool = False,
                                   ):
     # if isinstance(predicted_array_or_file, str):
     #     tmp = deepcopy(predicted_array_or_file)
@@ -101,7 +117,7 @@ def export_prediction_from_logits(predicted_array_or_file: Union[np.ndarray, tor
     label_manager = plans_manager.get_label_manager(dataset_json_dict_or_file)
     ret = convert_predicted_logits_to_segmentation_with_correct_shape(
         predicted_array_or_file, plans_manager, configuration_manager, label_manager, properties_dict,
-        return_probabilities=save_probabilities, latent_space=latent_space
+        return_probabilities=save_probabilities, latent_space=latent_space, is_segmentation=is_segmentation
     )
     del predicted_array_or_file
 

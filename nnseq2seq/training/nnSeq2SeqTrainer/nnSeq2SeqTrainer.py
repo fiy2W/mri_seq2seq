@@ -26,6 +26,7 @@ from batchgenerators.transforms.utility_transforms import RemoveLabelTransform, 
 from batchgenerators.utilities.file_and_folder_operations import join, load_json, isfile, save_json, maybe_mkdir_p
 from torch._dynamo import OptimizedModule
 
+from nnseq2seq.networks.ema import EMAModel
 from nnseq2seq.evaluation.evaluate_predictions import compute_metrics_on_folder
 from nnseq2seq.inference.export_prediction import export_prediction_from_logits, resample_and_save
 from nnseq2seq.inference.predict_from_raw_data import nnSeq2SeqPredictor
@@ -53,7 +54,7 @@ from nnseq2seq.training.loss.deep_supervision import DeepSupervisionWrapper
 from nnseq2seq.training.loss.dice import get_tp_fp_fn_tn, MemoryEfficientSoftDiceLoss
 from nnseq2seq.training.loss.metrics import torch_PSNR
 from nnseq2seq.training.loss.adversarial_loss import GANLoss
-from nnseq2seq.training.lr_scheduler.polylr import PolyLRScheduler
+from nnseq2seq.training.lr_scheduler.polylr import PolyLRScheduler, WarmupCosineLRScheduler
 from nnseq2seq.utilities.collate_outputs import collate_outputs
 from nnseq2seq.utilities.crossval_split import generate_crossval_split
 from nnseq2seq.utilities.default_n_proc_DA import get_allowed_n_proc_DA
@@ -145,13 +146,22 @@ class nnSeq2SeqTrainer(object):
                 if self.is_cascaded else None
 
         ### Some hyperparameters for you to fiddle with
-        self.initial_lr = 1e-4
+        self.train_segmentation_only = False
+        self.train_translation_only = False
+        assert (self.train_segmentation_only and self.train_translation_only)==False, 'Cannot set both train_segmentation_only and train_translation_only as True at the same time.'
+
+        self.initial_lr = 2e-4
         self.weight_decay = 0.05 #3e-5
         self.oversample_foreground_percent = 0.33
         self.num_iterations_per_epoch = 250
         self.num_val_iterations_per_epoch = 50
-        self.num_epochs = 2000
-        self.num_epochs_for_pretrain = 1000
+
+        if self.train_segmentation_only:
+            self.num_epochs = 1000
+            self.num_epochs_for_pretrain = 1000
+        else:
+            self.num_epochs = 2000
+            self.num_epochs_for_pretrain = 1000
         self.current_epoch = 0
         self.enable_deep_supervision = True
 
@@ -162,6 +172,7 @@ class nnSeq2SeqTrainer(object):
 
         self.num_input_channels = None  # -> self.initialize()
         self.network = None  # -> self.build_network_architecture()
+        self.network_ema = None
         self.optimizer = self.lr_scheduler = None  # -> self.initialize
         self.optimizer_d = self.lr_scheduler = None
         self.grad_scaler = GradScaler() if self.device.type == 'cuda' else None
@@ -230,6 +241,8 @@ class nnSeq2SeqTrainer(object):
                 self.print_to_log_file('Using torch.compile...')
                 self.network = torch.compile(self.network)
 
+            self.network_ema = EMAModel(self.network.parameters())
+            self.network_ema.to(device=self.device)
             self.optimizer, self.optimizer_d, self.lr_scheduler = self.configure_optimizers()
             # if ddp, wrap in DDP wrapper
             if self.is_ddp:
@@ -521,7 +534,9 @@ class nnSeq2SeqTrainer(object):
         optimizer_d = torch.optim.AdamW(
             self.network.discriminator.parameters(), lr=self.initial_lr,
             betas=(0.9, 0.95), weight_decay=self.weight_decay)
-        lr_scheduler = PolyLRScheduler(optimizer, self.initial_lr, self.num_epochs)
+        #lr_scheduler = PolyLRScheduler(optimizer, self.initial_lr, self.num_epochs)
+        lr_scheduler = WarmupCosineLRScheduler(optimizer, self.initial_lr, self.num_epochs,
+            min_lr=1e-7, T_multi=1, N_cycle=2, warmup_epochs=10, warmup_initial_lr=1e-7)
         return optimizer, optimizer_d, lr_scheduler
 
     def plot_network_architecture(self):
@@ -747,7 +762,7 @@ class nnSeq2SeqTrainer(object):
             do_rotation=True, angle_x=rotation_for_DA['x'], angle_y=rotation_for_DA['y'], angle_z=rotation_for_DA['z'],
             p_rot_per_axis=1,  # todo experiment with this
             do_scale=True, scale=(0.7, 1.4),
-            border_mode_data="constant", border_cval_data=0, order_data=order_resampling_data,
+            border_mode_data="nearest", border_cval_data=0, order_data=order_resampling_data,
             border_mode_seg="constant", border_cval_seg=border_val_seg, order_seg=order_resampling_seg,
             random_crop=False,  # random cropping is part of our dataloaders
             p_el_per_sample=0, p_scale_per_sample=0.2, p_rot_per_sample=0.2,
@@ -926,11 +941,11 @@ class nnSeq2SeqTrainer(object):
 
     def on_train_epoch_start(self):
         self.network.train()
-        #self.lr_scheduler.step(self.current_epoch)
+        self.lr_scheduler.step(self.current_epoch)
         self.print_to_log_file('')
         self.print_to_log_file(f'Epoch {self.current_epoch}')
         self.print_to_log_file(
-            f"Current learning rate: {np.round(self.optimizer.param_groups[0]['lr'], decimals=5)}")
+            f"Current learning rate: {np.round(self.optimizer.param_groups[0]['lr'], decimals=7)}")
         # lrs are the same for all workers so we don't need to gather them in case of DDP training
         self.logger.log('lrs', self.optimizer.param_groups[0]['lr'], self.current_epoch)
 
@@ -947,12 +962,17 @@ class nnSeq2SeqTrainer(object):
         output_code = []
         other_code = []
         output_mask = []
+        output_atlas = []
+        flag_atlas = []
         for bid in range(len(properties)):
             if self.tgt_seq_pool is None:
                 self.tgt_seq_pool = [0 for i in range(self.num_input_channels)]
             inner_list = [v if i in properties[bid]['available_channel'] and i not in properties[bid]['input_domain'] else 1e+9 for i, v in enumerate(self.tgt_seq_pool)]
-            #seq_id = random.choice(properties[bid]['available_channel'])
-            seq_id = np.int64(inner_list.index(min(inner_list)))
+            
+            if random.random()>0.5:
+                seq_id = random.choice(properties[bid]['available_channel'])
+            else:
+                seq_id = np.int64(inner_list.index(min(inner_list)))
             output_data.append(data[bid:bid+1, seq_id:seq_id+1])
             output_code.append(seq_id)
             self.tgt_seq_pool[seq_id] += 1
@@ -961,16 +981,21 @@ class nnSeq2SeqTrainer(object):
             # calculate overlap mask, but it's hard because some image do not have zero background
             fg = torch.ones_like(data[0:1, 0:1])
             bg = torch.ones_like(data[0:1, 0:1])
-            #for seq_id in properties[bid]['available_channel']:
-            #    if seq_id not in properties[bid]['anchor_domain']:
-            #        fg *= (data[bid:bid+1, seq_id:seq_id+1]>0)
-            #        bg *= (data[bid:bid+1, seq_id:seq_id+1]<=0)
+            for seq_id in properties[bid]['available_channel']:
+                fg *= (data[bid:bid+1, seq_id:seq_id+1]>0)
+                bg *= (data[bid:bid+1, seq_id:seq_id+1]<=0)
             output_mask.append(fg+bg)
+            atlas_id = 0 if len(properties[bid]['atlas_domain'])==0 else random.choice(properties[bid]['atlas_domain'])
+            output_atlas.append(data[bid:bid+1, atlas_id:atlas_id+1])
+            flag_atlas.append(1 if atlas_id in properties[bid]['available_channel'] else 0)
+
         output_data = torch.cat(output_data, dim=0)
         output_code = torch.from_numpy(np.array(output_code))
         other_code = torch.from_numpy(np.array(other_code)).to(dtype=output_code.dtype)
         output_mask = torch.cat(output_mask, dim=0)
-        return output_data, output_code, other_code, output_mask
+        output_atlas = torch.cat(output_atlas, dim=0)
+        flag_atlas = torch.from_numpy(np.array(flag_atlas))
+        return output_data, output_code, other_code, output_mask, output_atlas, flag_atlas
     
     def random_select_available_multiseqs(self, properties, tgt_id):
         output_code = []
@@ -996,14 +1021,14 @@ class nnSeq2SeqTrainer(object):
         output_weight = torch.from_numpy(np.array(output_weight))
         return output_weight
 
-    def train_step(self, batch: dict) -> dict:
+    def train_step(self, batch_id: int, batch: dict) -> dict:
         ori_data = torch.clamp(batch['ori_data'], min=0)
         aug_data = batch['data']
         target = batch['target']
         properties = batch['properties']
         seg_weights = self.generate_seg_weights(properties)
 
-        tgt_data, tgt_code_int64, _, tgt_mask = self.random_select_available_seq(ori_data, properties)
+        tgt_data, tgt_code_int64, _, tgt_mask, atlas_data, flag_atlas = self.random_select_available_seq(ori_data, properties)
         src_all_code, src_code = self.random_select_available_multiseqs(properties, tgt_code_int64)
         rand_code_int64 = self.random_select_seq_code(properties)
 
@@ -1014,6 +1039,9 @@ class nnSeq2SeqTrainer(object):
         src_code = src_code.to(self.device, dtype=tgt_data.dtype, non_blocking=True)
         tgt_code = F.one_hot(tgt_code_int64, num_classes=self.num_input_channels).to(self.device, dtype=tgt_data.dtype, non_blocking=True)
         rand_code = F.one_hot(rand_code_int64, num_classes=self.num_input_channels).to(self.device, dtype=src_data.dtype, non_blocking=True)
+
+        atlas_data = atlas_data.to(self.device, non_blocking=True)
+        flag_atlas = flag_atlas.to(self.device, dtype=atlas_data.dtype, non_blocking=True).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
         
         if isinstance(target, list):
             target = [i.to(self.device, non_blocking=True) for i in target]
@@ -1032,10 +1060,13 @@ class nnSeq2SeqTrainer(object):
         if self.current_epoch>self.num_epochs_for_pretrain:
             self.optimizer_d.zero_grad(set_to_none=True)
             with torch.no_grad():
-                output_src2rand_all, output_src2rand_sub = self.network(src_data, src_all_code, src_code, rand_code, with_latent=False)
-            pred_real = self.network.discriminator(img_rand_dis)
-            pred_fake1 = self.network.discriminator(torch.clamp(output_src2rand_all[0].detach(), min=0))
-            pred_fake2 = self.network.discriminator(torch.clamp(output_src2rand_sub[0].detach(), min=0))
+                output_src2rand_all, output_src2rand_sub, _, _ = self.network(src_data, src_all_code, src_code, rand_code, with_latent=False)
+            pred_real = self.network.discriminator(img_rand_dis, rand_code)
+            if not self.enable_deep_supervision:
+                output_src2rand_all = [output_src2rand_all]
+                output_src2rand_sub = [output_src2rand_sub]
+            pred_fake1 = self.network.discriminator(torch.clamp(output_src2rand_all[0].detach(), min=0), rand_code)
+            pred_fake2 = self.network.discriminator(torch.clamp(output_src2rand_sub[0].detach(), min=0), rand_code)
             ld = self.gan(pred_real, True) + 0.5*self.gan(pred_fake1, False) + 0.5*self.gan(pred_fake2, False)
             ld.backward()
             torch.nn.utils.clip_grad_norm_(self.network.discriminator.parameters(), 12)
@@ -1045,32 +1076,66 @@ class nnSeq2SeqTrainer(object):
         self.optimizer.zero_grad(set_to_none=True)
         
         #with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
-        output_src2tgt_all, output_src2tgt_sub, latent_src_all, latent_src_sub, vq_loss_src = self.network(src_data, src_all_code, src_code, tgt_code, with_latent=True)
-        mask_src_all = self.network.segmentor(latent_src_all)
-        mask_src_sub = self.network.segmentor(latent_src_sub)
-        
+        output_src2tgt_all, output_src2tgt_sub, latent_src_all, latent_src_sub, latent_src_all_seg, latent_src_sub_seg, vq_loss_src, fusion_all, fusion_subgroup = self.network(src_data, src_all_code, src_code, tgt_code, with_latent=True)
+        mask_src_all = self.network.segmentor(latent_src_all_seg)
+        mask_src_sub = self.network.segmentor(latent_src_sub_seg)
 
         # del data
         #int_datas = [F.interpolate(int_data, scale_factor=1/2**i, mode='nearest') for i in range(len(target))]
-        tgt_datas = [F.interpolate(tgt_data, scale_factor=1/2**i, mode='bilinear' if len(tgt_data.shape)==4 else 'trilinear') for i in range(len(target))]
-        tgt_masks = [F.interpolate(tgt_mask, scale_factor=1/2**i, mode='nearest') for i in range(len(target))]
-        l = 0.5*self.loss(output_src2tgt_all, tgt_datas, tgt_masks) + \
-            0.5*self.loss(output_src2tgt_sub, tgt_datas, tgt_masks) + \
-            vq_loss_src + \
-            self.seg_loss(mask_src_all, target, [seg_weights for _ in target]) + \
-            self.seg_loss(mask_src_sub, target, [seg_weights for _ in target])
-            
-        
-        if self.current_epoch>self.num_epochs_for_pretrain:
-            output_src2rand_all = self.network.hyper_decoder(latent_src_all, rand_code)
-            output_src2rand_sub = self.network.hyper_decoder(latent_src_sub, rand_code)
-
-            pred_fake1 = self.network.discriminator(torch.clamp(output_src2rand_all[0], min=0))
-            pred_fake2 = self.network.discriminator(torch.clamp(output_src2rand_sub[0], min=0))
-            l += (self.gan(pred_fake1, True) + self.gan(pred_fake2, True))
+        if self.enable_deep_supervision:
+            tgt_datas = [F.interpolate(tgt_data, scale_factor=1/2**i, mode='bilinear' if len(tgt_data.shape)==4 else 'trilinear') for i in range(len(target))]
+            tgt_masks = [F.interpolate(tgt_mask, scale_factor=1/2**i, mode='nearest') for i in range(len(target))]
+            if self.train_segmentation_only:
+                l = self.seg_loss(mask_src_all, target, [seg_weights for _ in target]) + \
+                    self.seg_loss(mask_src_sub, target, [seg_weights for _ in target])
+            elif self.train_translation_only:
+                l = self.loss(output_src2tgt_all, tgt_datas, tgt_masks) + \
+                    self.loss(output_src2tgt_sub, tgt_datas, tgt_masks)
+            else:
+                l = self.loss(output_src2tgt_all, tgt_datas, tgt_masks) + \
+                    self.loss(output_src2tgt_sub, tgt_datas, tgt_masks) + \
+                    self.seg_loss(mask_src_all, target, [seg_weights for _ in target]) + \
+                    self.seg_loss(mask_src_sub, target, [seg_weights for _ in target])
         else:
-            output_src2rand_all = output_src2tgt_all
-            output_src2rand_sub = output_src2tgt_sub
+            if self.train_segmentation_only:
+                l = self.seg_loss(0, mask_src_all, target, seg_weights) + \
+                    self.seg_loss(0, mask_src_sub, target, seg_weights)
+            elif self.train_translation_only:
+                l = self.loss(0, output_src2tgt_all, tgt_data, tgt_mask) + \
+                    self.loss(0, output_src2tgt_sub, tgt_data, tgt_mask)
+            else:
+                l = self.loss(0, output_src2tgt_all, tgt_data, tgt_mask) + \
+                    self.loss(0, output_src2tgt_sub, tgt_data, tgt_mask) + \
+                    self.seg_loss(0, mask_src_all, target, seg_weights) + \
+                    self.seg_loss(0, mask_src_sub, target, seg_weights)
+
+        l = l + vq_loss_src   
+        if not self.train_segmentation_only:
+            l = l + \
+                nn.MSELoss()(fusion_all[1], latent_src_all[-1].detach()) + \
+                nn.MSELoss()(fusion_subgroup[1], latent_src_sub[-1].detach()) + \
+                nn.MSELoss()(fusion_all[0]*flag_atlas*tgt_mask, atlas_data*flag_atlas*tgt_mask) + \
+                nn.MSELoss()(fusion_subgroup[0]*flag_atlas*tgt_mask, atlas_data*flag_atlas*tgt_mask)
+
+            
+        if self.current_epoch>self.num_epochs_for_pretrain:
+            output_src2rand_all, _ = self.network.hyper_decoder(latent_src_all, rand_code)
+            output_src2rand_sub, _ = self.network.hyper_decoder(latent_src_sub, rand_code)
+            if not self.enable_deep_supervision:
+                output_src2rand_all = [output_src2rand_all]
+                output_src2rand_sub = [output_src2rand_sub]
+            pred_fake1 = self.network.discriminator(torch.clamp(output_src2rand_all[0], min=0), rand_code)
+            pred_fake2 = self.network.discriminator(torch.clamp(output_src2rand_sub[0], min=0), rand_code)
+            l += (self.gan(pred_fake1, True) + self.gan(pred_fake2, True) + \
+                nn.MSELoss()(output_src2rand_sub[0], torch.clamp(output_src2rand_all[0].detach(), min=0)) + \
+                nn.MSELoss()(output_src2rand_all[0], torch.clamp(output_src2rand_sub[0].detach(), min=0)))
+        else:
+            if not self.enable_deep_supervision:
+                output_src2rand_all = [output_src2tgt_all]
+                output_src2rand_sub = [output_src2tgt_sub]
+            else:
+                output_src2rand_all = output_src2tgt_all
+                output_src2rand_sub = output_src2tgt_sub
             
         if self.grad_scaler is not None:
             self.grad_scaler.scale(l).backward()
@@ -1087,14 +1152,24 @@ class nnSeq2SeqTrainer(object):
             torch.nn.utils.clip_grad_norm_(self.network.segmentor.parameters(), 12)
             self.optimizer.step()
         
+        self.network_ema.step(self.network.parameters())
+        
         for tgt_id in range(tgt_code_int64.shape[0]):
-            self.img_dis[tgt_code_int64[rand_id]] = tgt_data[tgt_id]
+            if torch.std(tgt_data[tgt_id])>0:
+                self.img_dis[tgt_code_int64[tgt_id]] = tgt_data[tgt_id]
             
 
         vis_path = os.path.join(self.output_folder, 'visualization')
         os.makedirs(vis_path, exist_ok=True)
         vis_save_path = os.path.join(vis_path, 'epoch_{}.jpg'.format(self.current_epoch))
-        if not os.path.exists(vis_save_path):
+        if batch_id==0:
+            if not self.enable_deep_supervision:
+                output_src2tgt_all = [output_src2tgt_all]
+                output_src2tgt_sub = [output_src2tgt_sub]
+                mask_src_all = [mask_src_all]
+                mask_src_sub = [mask_src_sub]
+                target = [target]
+
             with torch.no_grad():
                 max_label = mask_src_all[0].shape[1] - 1
                 mask_src_all = [torch.argmax(m, dim=1, keepdim=True)/max_label for m in mask_src_all]
@@ -1105,7 +1180,7 @@ class nnSeq2SeqTrainer(object):
                         tgt_data[:,:,sd], output_src2tgt_all[0][:,:,sd], output_src2tgt_sub[0][:,:,sd], torch.abs(output_src2tgt_all[0]-output_src2tgt_sub[0])[:,:,sd],
                         img_rand_dis[:,:,sd], output_src2rand_all[0][:,:,sd], output_src2rand_sub[0][:,:,sd], torch.abs(output_src2rand_all[0]-output_src2rand_sub[0])[:,:,sd],
                         target[0][:,:,sd]/max_label, mask_src_all[0][:,:,sd], mask_src_sub[0][:,:,sd], tgt_mask[:,:,sd],
-                        tgt_mask[:,:,sd], tgt_mask[:,:,sd], tgt_mask[:,:,sd], tgt_mask[:,:,sd],
+                        tgt_mask[:,:,sd], fusion_all[0][:,0:1,sd], fusion_all[0][:,1:2,sd], fusion_all[0][:,2:3,sd],
                     ], dim=1).reshape(-1,1,*(src_data.shape[3:]))
                     vimage = torch.clamp(vimage, min=0, max=1)
                     torchvision.utils.save_image(vimage, vis_save_path)
@@ -1128,22 +1203,32 @@ class nnSeq2SeqTrainer(object):
                         tgt_data, output_src2tgt_all[0], output_src2tgt_sub[0], torch.abs(output_src2tgt_all[0]-output_src2tgt_sub[0]),
                         img_rand_dis, output_src2rand_all[0], output_src2rand_sub[0], torch.abs(output_src2rand_all[0]-output_src2rand_sub[0]),
                         target[0]/max_label, mask_src_all[0], mask_src_sub[0], tgt_mask,
-                        tgt_mask, tgt_mask, tgt_mask, tgt_mask,
+                        tgt_mask, fusion_all[0][:, 0:1], fusion_all[0][:, 1:2], fusion_all[0][:, 2:3],
                     ], dim=1).reshape(-1,1,*(src_data.shape[2:]))
                     vimage = torch.clamp(vimage, min=0, max=1)
                     torchvision.utils.save_image(vimage, vis_save_path)
+
                     torchvision.utils.save_image(self.img_dis, os.path.join(vis_path, 'discriminator.jpg'))
+
+                    vimage = torch.stack([
+                            fusion_all[0], fusion_all[1], fusion_subgroup[0], fusion_subgroup[1], 
+                        ], dim=1).reshape(-1,*(fusion_all[0].shape[1:]))
+                    vimage = torch.clamp(vimage, min=0, max=1)
+                    torchvision.utils.save_image(vimage, os.path.join(vis_path, 'fusion.jpg'))
+
                     for vi, (lat_all, lat_sub) in enumerate(zip(latent_src_all, latent_src_sub)):
                         vimage = torch.stack([
                             lat_all, lat_sub
                         ], dim=1).reshape(-1,*(lat_all.shape[1:]))
                         torchvision.utils.save_image(vimage, os.path.join(vis_path, 'latent_space_{}.jpg'.format(vi)))
-                    for vi, (out_all, out_sub, out_tgt, m_all, m_sub, m_tgt) in enumerate(zip(output_src2tgt_all, output_src2tgt_sub, tgt_datas, mask_src_all, mask_src_sub, target)):
-                        vimage = torch.stack([
-                            out_all, out_tgt, out_sub, out_tgt, m_all, m_tgt/max_label, m_sub, m_tgt/max_label
-                        ], dim=1).reshape(-1,1,*(out_all.shape[2:]))
-                        vimage = torch.clamp(vimage, min=0, max=1)
-                        torchvision.utils.save_image(vimage, os.path.join(vis_path, 'deep_{}.jpg'.format(vi)))
+                    
+                    if self.enable_deep_supervision:
+                        for vi, (out_all, out_sub, out_tgt, m_all, m_sub, m_tgt) in enumerate(zip(output_src2tgt_all, output_src2tgt_sub, tgt_datas, mask_src_all, mask_src_sub, target)):
+                            vimage = torch.stack([
+                                out_all, out_tgt, out_sub, out_tgt, m_all, m_tgt/max_label, m_sub, m_tgt/max_label
+                            ], dim=1).reshape(-1,1,*(out_all.shape[2:]))
+                            vimage = torch.clamp(vimage, min=0, max=1)
+                            torchvision.utils.save_image(vimage, os.path.join(vis_path, 'deep_{}.jpg'.format(vi)))
         return {'loss': l.detach().cpu().numpy()}
 
     def on_train_epoch_end(self, train_outputs: List[dict]):
@@ -1165,8 +1250,9 @@ class nnSeq2SeqTrainer(object):
         data = batch['data']
         target = batch['target']
         properties = batch['properties']
+        seg_weights = self.generate_seg_weights(properties)
 
-        tgt_data, tgt_code_int64, _, tgt_mask = self.random_select_available_seq(data, properties)
+        tgt_data, tgt_code_int64, _, tgt_mask, _, _ = self.random_select_available_seq(data, properties)
         src_all_code, src_code = self.random_select_available_multiseqs(properties, tgt_code_int64)
         
         src_data = data.to(self.device, non_blocking=True)
@@ -1180,18 +1266,25 @@ class nnSeq2SeqTrainer(object):
             target = [i.to(self.device, non_blocking=True) for i in target]
         else:
             target = target.to(self.device, non_blocking=True)
+        seg_weights = seg_weights.to(self.device, dtype=src_data.dtype, non_blocking=True)
 
         # Autocast can be annoying
         # If the device_type is 'cpu' then it's slow as heck and needs to be disabled.
         # If the device_type is 'mps' then it will complain that mps is not implemented, even if enabled=False is set. Whyyyyyyy. (this is why we don't make use of enabled=False)
         # So autocast will only be active if we have a cuda device.
         with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
-            _, output = self.network(src_data, src_all_code, src_code, tgt_code)
+            _, output, _, _, latent_src_all_seg, _, _, _, _ = self.network(src_data, src_all_code, src_code, tgt_code,
+                                                                           with_latent=True,
+                                                                           latent_focal='dispersion' if self.network.hyper_decoder.focal_mode=='focal_mix' else None)
+            mask_src_all = self.network.segmentor(latent_src_all_seg)
             del data
-            l = self.loss(
-                output,
-                [F.interpolate(tgt_data, scale_factor=1/2**i, mode='bilinear' if len(tgt_data.shape)==4 else 'trilinear') for i in range(len(target))],
-                [F.interpolate(tgt_mask, scale_factor=1/2**i, mode='bilinear' if len(tgt_data.shape)==4 else 'trilinear') for i in range(len(target))])
+            if self.train_segmentation_only:
+                l = self.seg_loss(mask_src_all, target, [seg_weights for _ in target])
+            else:
+                l = self.loss(
+                    output,
+                    [F.interpolate(tgt_data, scale_factor=1/2**i, mode='bilinear' if len(tgt_data.shape)==4 else 'trilinear') for i in range(len(target))],
+                    [F.interpolate(tgt_mask, scale_factor=1/2**i, mode='bilinear' if len(tgt_data.shape)==4 else 'trilinear') for i in range(len(target))])
 
         # we only need the output with the highest output resolution (if DS enabled)
         if self.enable_deep_supervision:
@@ -1199,7 +1292,10 @@ class nnSeq2SeqTrainer(object):
             tgt_data = torch.clamp(tgt_data, 0, 1)
             #target = target[0]
         
-        psnr = torch_PSNR(tgt_data*tgt_mask, output*tgt_mask, data_range=1)
+        if self.train_segmentation_only:
+            psnr = -l
+        else:
+            psnr = torch_PSNR(tgt_data*tgt_mask, output*tgt_mask, data_range=1)
 
         # # the following is needed for online evaluation. Fake dice (green line)
         # axes = [0] + list(range(2, output.ndim))
@@ -1314,6 +1410,9 @@ class nnSeq2SeqTrainer(object):
     def save_checkpoint(self, filename: str) -> None:
         if self.local_rank == 0:
             if not self.disable_checkpointing:
+                self.network_ema.store(self.network.parameters())
+                self.network_ema.copy_to(self.network.parameters())
+                
                 if self.is_ddp:
                     mod = self.network.module
                 else:
@@ -1333,6 +1432,8 @@ class nnSeq2SeqTrainer(object):
                     'inference_allowed_mirroring_axes': self.inference_allowed_mirroring_axes,
                 }
                 torch.save(checkpoint, filename)
+
+                self.network_ema.restore(self.network.parameters())
             else:
                 self.print_to_log_file('No checkpoint written, checkpointing is disabled')
 
@@ -1533,14 +1634,17 @@ class nnSeq2SeqTrainer(object):
             self.on_train_epoch_start()
             train_outputs = []
             for batch_id in range(self.num_iterations_per_epoch):
-                train_outputs.append(self.train_step(next(self.dataloader_train)))
+                train_outputs.append(self.train_step(batch_id, next(self.dataloader_train)))
             self.on_train_epoch_end(train_outputs)
 
             with torch.no_grad():
                 self.on_validation_epoch_start()
                 val_outputs = []
+                self.network_ema.store(self.network.parameters())
+                self.network_ema.copy_to(self.network.parameters())
                 for batch_id in range(self.num_val_iterations_per_epoch):
                     val_outputs.append(self.validation_step(next(self.dataloader_val)))
+                self.network_ema.restore(self.network.parameters())
                 self.on_validation_epoch_end(val_outputs)
 
             self.on_epoch_end()

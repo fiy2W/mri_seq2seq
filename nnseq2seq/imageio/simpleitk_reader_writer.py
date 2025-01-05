@@ -101,11 +101,13 @@ class SimpleITKIO(BaseReaderWriter):
 
     def write_seg(self, seg: np.ndarray, output_fname: str, properties: dict, with_head: bool=True) -> None:
         if with_head:
-            assert seg.ndim == 3, 'segmentation must be 3d. If you are exporting a 2d segmentation, please provide it as shape 1,x,y'
+            #assert seg.ndim == 3, 'segmentation must be 3d. If you are exporting a 2d segmentation, please provide it as shape 1,x,y'
             output_dimension = len(properties['sitk_stuff']['spacing'])
             assert 1 < output_dimension < 4
             if output_dimension == 2:
                 seg = seg[0]
+            if len(seg.shape) == 4:
+                seg = np.transpose(seg, axes=[i+1 for i in range(output_dimension)]+[0])
 
             itk_image = sitk.GetImageFromArray(seg.astype(np.float32))
             itk_image.SetSpacing(properties['sitk_stuff']['spacing'])

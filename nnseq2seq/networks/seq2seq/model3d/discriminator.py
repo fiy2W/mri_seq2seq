@@ -16,6 +16,9 @@ class NLayerDiscriminator(nn.Module):
         n_layers = args['n_layers']
         kw = args['kw']
         padw = args['padw']
+        hyper_dim = args['hyper_conv_dim']
+        style_dim = args['style_dim']
+        layer_scale_init_value = args['layer_scale_init_value']
 
         sequence = [nn.Conv3d(c_in, ndf, kernel_size=kw, stride=2, padding=padw), nn.LeakyReLU(0.2, True)]
         nf_mult = 1
@@ -37,10 +40,13 @@ class NLayerDiscriminator(nn.Module):
             nn.LeakyReLU(0.2, True)
         ]
 
-        sequence += [
-            nn.Conv3d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]  # output 1 channel prediction map
+        #sequence += [
+        #    nn.Conv3d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]  # output 1 channel prediction map
         self.main = nn.Sequential(*sequence)
+        self.hyper = hyperAttnResBlock(ndf*nf_mult, style_dim, 2, hyper_dim, 1, 0, layer_scale_init_value=layer_scale_init_value, use_attn=True)
 
-    def forward(self, input):
+    def forward(self, input, s):
         """Standard forward."""
-        return self.main(input)
+        x = self.main(input)
+        x = self.hyper(x, s)
+        return x

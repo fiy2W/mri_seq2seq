@@ -1,11 +1,20 @@
 ## Todo
-- [ ] Improve perceptual loss for 3D model.
-- [ ] Pre-trained models for multi-sequence breast MRI.
-- [ ] Add inference API.
+- [ ] Improve 3D model.
+- [ ] Pre-trained models.
+- [ ] Build docker.
+- [ ] Add document and example for different tasks.
 
 ## Update log
-### v0.1.2 (Alpha)
+### v0.1.2 (2025-01-06)
+**`[New]:`**
+- Add inference API.
+- Add fusion image as new output.
+- Add `EMA` model.
+- Add `WarmupCosineLRScheduler`.
+
 **`[Update]:`**
+- Update the implementation of `HyperConv`.
+- Update model architectures.
 - Update weight of perceptual loss.
 - Sequence with `'input'` in `channel_names` will be set as input domain (only used as input channel), sequence with `'output'` in `channel_names` will be set as output domain (only used as output channel).
 - Update documents.

@@ -1,10 +1,11 @@
 import numpy as  np
+import random
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nnseq2seq.networks.seq2seq.model2d.convnext import LayerNorm, AttnResBlock, hyperAttnResBlock, hyperConv
+from nnseq2seq.networks.seq2seq.model2d.convnext import LayerNorm, hyperAttnResBlock, hyperConv
 
 
 class HyperImageDecoder(nn.Module):
@@ -23,6 +24,7 @@ class HyperImageDecoder(nn.Module):
         self.latent_space_dim = args['latent_space_dim']
         self.style_dim = args['style_dim']
         self.deep_supervision = args['deep_supervision']
+        self.focal_mode = args['focal_mode']
 
         self.down_layers = nn.ModuleList()
         self.midres_layers = nn.ModuleList()
@@ -50,11 +52,46 @@ class HyperImageDecoder(nn.Module):
                     nn.Upsample(scale_factor=se, mode='nearest'),
                 ))
                 up_scale = up_scale//se
+        
+        self.image_fusion = nn.Sequential(
+            nn.Conv2d(self.latent_space_dim, out_channels=3, kernel_size=1, padding=0, stride=1, padding_mode='zeros'),
+            nn.LeakyReLU(0.01, inplace=True),
+        )
+        self.image_fusion_inv = nn.Sequential(
+            nn.Conv2d(3, out_channels=self.latent_space_dim, kernel_size=1, padding=0, stride=1, padding_mode='zeros'),
+        )
             
-    def forward(self, zqs, s):
+    def forward(self, zqs, s, latent_focal=None):
         outputs = []
         up_scale = np.prod(self.s_enc)
-        for i, (z, down, midr, deep, up) in enumerate(zip(zqs, self.down_layers, self.midres_layers, self.deep_layers, self.up_layers)):
+
+        if latent_focal is None:
+            focal_mode = self.focal_mode
+        else:
+            focal_mode = latent_focal
+        
+        if focal_mode=='dispersion':
+            zid = 0
+        elif focal_mode=='focal_x1':
+            zid = -1
+        elif focal_mode=='focal_x2':
+            zid = -2
+        elif focal_mode=='focal_x4':
+            zid = -3
+        elif focal_mode=='focal_x8':
+            zid = -4
+        elif focal_mode=='focal_x16':
+            zid = -5
+        elif focal_mode=='focal_mix':
+            zid = random.choice([0, 0, 0, 0, 0, -1, -2, -3, -4, -5])
+        else:
+            raise
+
+        for i, (z0, down, midr, deep, up) in enumerate(zip(zqs, self.down_layers, self.midres_layers, self.deep_layers, self.up_layers)):
+            if zid==0:
+                z = z0
+            else:
+                z = F.interpolate(zqs[zid], size=z0.shape[2:], mode='bilinear')
             if i==0:
                 x = down(z, s)
             else:
@@ -67,7 +104,10 @@ class HyperImageDecoder(nn.Module):
             
         outputs = outputs[::-1]
 
+        image_fusion = self.image_fusion(zqs[-1].detach())
+        latent_inv = self.image_fusion_inv(image_fusion)
+
         if not self.deep_supervision:
-            return outputs[0]
+            return outputs[0], [image_fusion, latent_inv]
         else:
-            return outputs
+            return outputs, [image_fusion, latent_inv]

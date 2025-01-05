@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nnseq2seq.networks.seq2seq.model2d.convnext import LayerNorm, AttnResBlock, hyperConv, hyperAttnResBlock
+from nnseq2seq.networks.seq2seq.model2d.convnext import LayerNorm, AttnResBlock
 from nnseq2seq.networks.seq2seq.model2d.quantize import VectorQuantizer2 as VectorQuantizer
 
 
@@ -31,6 +31,8 @@ class ImageEncoder(nn.Module):
         self.latent_fusion = nn.Sequential(
             nn.Linear(self.style_dim, self.style_dim*4),
             nn.Linear(self.style_dim*4, self.style_dim),
+            #nn.Softmax(1),
+            nn.Sigmoid(),
         )
         c_pre = self.c_in
         up_scale = 1
@@ -62,14 +64,18 @@ class ImageEncoder(nn.Module):
 
     def tsf(self, z, s, weight, level, b, n):
         _, c0, w0, h0 = z.shape
-        z = z.reshape(b, n, c0, w0, h0)*s.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-        z = torch.sum(z*weight, dim=1)
-        return z, c0
+        s = s.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+        z = z.reshape(b, n, c0, w0, h0)
+        z_mean = torch.sum(z*weight, dim=1)/(torch.sum(weight*s, dim=1)+1e-5)
+        tsf_loss = torch.mean(((z-z_mean.unsqueeze(1).detach())*s)**2)
+        return z_mean, tsf_loss
 
     def forward(self, x, s_all, s_subgroup):
         features = []
         zqs_all = []
         zqs_subgroup = []
+        zs_all_seg = []
+        zs_subgroup_seg = []
         vq_losses = 0
 
         b, n, w, h = x.shape
@@ -82,26 +88,27 @@ class ImageEncoder(nn.Module):
         weight_sub = (self.latent_fusion(s_subgroup)*s_subgroup).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
         
         for i in reversed(range(len(features))):
-            if i==len(features)-1:
-                z1 = self.conv_latent[i](x)
-                z2 = z1
-            else:
-                z1 = self.conv_latent[i](torch.cat([x1, features[i]], dim=1))
-                z2 = self.conv_latent[i](torch.cat([x2, features[i]], dim=1))
+            f1, tsf_loss = self.tsf(features[i], s_all, weight_all, i, b, n)
+            f2, _ = self.tsf(features[i], s_subgroup, weight_sub, i, b, n)
 
-            z1, c0 = self.tsf(z1, s_all, weight_all, i, b, n)
-            z2, _ = self.tsf(z2, s_subgroup, weight_sub, i, b, n)
-            
+            if i==len(features)-1:
+                z1 = self.conv_latent[i](f1)
+                z2 = self.conv_latent[i](f2)
+            else:
+                f1 = torch.cat([x1, f1], dim=1)
+                f2 = torch.cat([x2, f2], dim=1)
+                z1 = self.conv_latent[i](f1)
+                z2 = self.conv_latent[i](f2)
+
             zq1, vq_loss1, _ = self.quantize(z1)
             zq2, vq_loss2, _ = self.quantize(z2)
             zqs_all.append(zq1)
             zqs_subgroup.append(zq2)
-            vq_losses += (vq_loss1 + vq_loss2 + self.vq_beta * torch.mean((zq1.detach()-z2)**2))
+            zs_all_seg.append(f1)
+            zs_subgroup_seg.append(f2)
+            vq_losses += (vq_loss1 + vq_loss2 + tsf_loss + torch.mean((z1.detach()-z2)**2) + torch.mean((z2.detach()-z1)**2))
             
-            x1 = torch.tile(self.up_layers[i](zq1).unsqueeze(1), (1,n,1,1,1))
-            x2 = torch.tile(self.up_layers[i](zq2).unsqueeze(1), (1,n,1,1,1))
-            w0, h0 = x1.shape[3:]
-            x1 = x1.reshape(-1,c0,w0,h0)
-            x2 = x2.reshape(-1,c0,w0,h0)
+            x1 = self.up_layers[i](zq1)
+            x2 = self.up_layers[i](zq2)
         
-        return zqs_all, zqs_subgroup, vq_losses
+        return zqs_all, zqs_subgroup, zs_all_seg, zs_subgroup_seg, vq_losses

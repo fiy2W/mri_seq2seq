@@ -20,6 +20,7 @@ class Segmentor(nn.Module):
         self.p_res = args['resblock_padding']
         self.layer_scale_init_value = args['layer_scale_init_value']
         self.latent_space_dim = args['latent_space_dim']
+        self.deep_supervision = args['deep_supervision']
 
         self.down_layers = nn.ModuleList()
         self.midres_layers = nn.ModuleList()
@@ -28,7 +29,7 @@ class Segmentor(nn.Module):
         up_scale = np.prod(self.s_enc)
         for i, (ce, ke, se, nr, kr, pr) in enumerate(zip(self.c_enc, self.k_enc, self.s_enc, self.n_res, self.k_res, self.p_res)):
             self.down_layers.append(
-                nn.Conv3d(in_channels=self.latent_space_dim if i==0 else self.latent_space_dim+ce, out_channels=ce, kernel_size=3, padding=1, stride=1),
+                nn.Conv3d(in_channels=ce if i==0 else self.latent_space_dim+ce*2, out_channels=ce, kernel_size=3, padding=1, stride=1),
             )
             self.midres_layers.append(
                 AttnResBlock(dim=ce, n_layer=nr, kernel_size=kr, padding=pr, layer_scale_init_value=self.layer_scale_init_value, use_attn=True if up_scale>=4 else False)
@@ -36,7 +37,7 @@ class Segmentor(nn.Module):
             self.deep_layers.append(nn.Sequential(
                 LayerNorm(ce, eps=1e-6, data_format="channels_first"),
                 nn.Conv3d(ce, out_channels=self.c_out, kernel_size=3, padding=1, stride=1, padding_mode='zeros'),
-                nn.LeakyReLU(0.01, inplace=True),
+                #nn.LeakyReLU(0.01, inplace=True),
             ))
             if i==(len(self.c_enc)-1):
                 self.up_layers.append(nn.Identity())
@@ -60,4 +61,8 @@ class Segmentor(nn.Module):
             x = up(x)
             
         outputs = outputs[::-1]
-        return outputs
+
+        if not self.deep_supervision:
+            return outputs[0]
+        else:
+            return outputs

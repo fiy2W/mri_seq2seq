@@ -30,6 +30,7 @@ def get_network_from_plans(arch_class_name, arch_kwargs, arch_kwargs_req_import,
 
     if deep_supervision==False or 'deep_supervision' not in arch_kwargs['image_decoder'].keys():
         arch_kwargs['image_decoder']['deep_supervision'] = deep_supervision
+        arch_kwargs['segmentor']['deep_supervision'] = deep_supervision
 
     network = nw_class(
         #input_channels=input_channels,
