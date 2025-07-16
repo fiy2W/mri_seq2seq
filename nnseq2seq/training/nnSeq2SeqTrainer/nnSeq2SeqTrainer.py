@@ -156,14 +156,10 @@ class nnSeq2SeqTrainer(object):
         self.num_iterations_per_epoch = 250
         self.num_val_iterations_per_epoch = 50
 
-        if self.train_segmentation_only:
-            self.num_epochs = 1000
-            self.num_epochs_for_pretrain = 1000
-        else:
-            self.num_epochs = 2000
-            self.num_epochs_for_pretrain = 1000
+        self.num_epochs = 1000
         self.current_epoch = 0
         self.enable_deep_supervision = True
+        self.enable_iteration = False
 
         ### Dealing with labels/regions
         self.label_manager = self.plans_manager.get_label_manager(dataset_json)
@@ -174,13 +170,9 @@ class nnSeq2SeqTrainer(object):
         self.network = None  # -> self.build_network_architecture()
         self.network_ema = None
         self.optimizer = self.lr_scheduler = None  # -> self.initialize
-        self.optimizer_d = self.lr_scheduler = None
-        self.grad_scaler = GradScaler() if self.device.type == 'cuda' else None
+        self.grad_scaler = None#GradScaler() if self.device.type == 'cuda' else None
         self.loss = None  # -> self.initialize
         self.seg_loss = None
-        self.gan = GANLoss('hinge').to(device=self.device)
-        self.img_dis = None
-        self.tgt_seq_pool = None
 
         ### Simple logging. Don't take that away from me!
         # initialize log file. This is just our log for the print statements etc. Not to be confused with lightning
@@ -243,7 +235,7 @@ class nnSeq2SeqTrainer(object):
 
             self.network_ema = EMAModel(self.network.parameters())
             self.network_ema.to(device=self.device)
-            self.optimizer, self.optimizer_d, self.lr_scheduler = self.configure_optimizers()
+            self.optimizer, self.lr_scheduler = self.configure_optimizers()
             # if ddp, wrap in DDP wrapper
             if self.is_ddp:
                 self.network = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.network)
@@ -333,7 +325,7 @@ class nnSeq2SeqTrainer(object):
             #deep_supervision_scales = list(list(i) for i in 1 / np.cumprod(np.vstack(
             #    self.configuration_manager.pool_op_kernel_sizes), axis=0))[:-1]
             deep_supervision_scales = [1/2**i for i, _ in enumerate(
-                self.configuration_manager.network_arch_init_kwargs['image_decoder']['conv_kernel'])]
+                self.configuration_manager.network_arch_init_kwargs['conv_channels'])]
         else:
             deep_supervision_scales = None  # for train and val_transforms
         return deep_supervision_scales
@@ -405,7 +397,7 @@ class nnSeq2SeqTrainer(object):
             scale_factor = 1
         loss = L1_SSIM_and_Perceptual_loss(self.device, weight_l1=10, weight_ssim=1, weight_perceptual=weight_perceptual, spatial_dims=spatial_dims)
         loss_seg = DC_and_CE_loss({'batch_dice': self.configuration_manager.batch_dice,
-                                            'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp}, {'reduction': 'none'}, weight_ce=1, weight_dice=1,
+                                            'smooth': 1.0, 'do_bg': False, 'ddp': self.is_ddp}, {'reduction': 'none'}, weight_ce=1, weight_dice=1,
                                             ignore_label=self.label_manager.ignore_label, dice_class=MemoryEfficientSoftDiceLoss)
 
         # we give each output a weight which decreases exponentially (division by 2) as the resolution decreases
@@ -526,18 +518,12 @@ class nnSeq2SeqTrainer(object):
     def configure_optimizers(self):
         #optimizer = torch.optim.SGD(self.network.parameters(), self.initial_lr, weight_decay=self.weight_decay,
         #                            momentum=0.99, nesterov=True)
-        optimizer = torch.optim.AdamW(
-            list(self.network.image_encoder.parameters()) + \
-            list(self.network.hyper_decoder.parameters()) + \
-            list(self.network.segmentor.parameters()), lr=self.initial_lr,
-            betas=(0.9, 0.95), weight_decay=self.weight_decay)
-        optimizer_d = torch.optim.AdamW(
-            self.network.discriminator.parameters(), lr=self.initial_lr,
+        optimizer = torch.optim.AdamW(self.network.parameters(), lr=self.initial_lr,
             betas=(0.9, 0.95), weight_decay=self.weight_decay)
         #lr_scheduler = PolyLRScheduler(optimizer, self.initial_lr, self.num_epochs)
         lr_scheduler = WarmupCosineLRScheduler(optimizer, self.initial_lr, self.num_epochs,
-            min_lr=1e-7, T_multi=1, N_cycle=2, warmup_epochs=10, warmup_initial_lr=1e-7)
-        return optimizer, optimizer_d, lr_scheduler
+            min_lr=1e-7, T_multi=1, N_cycle=1, warmup_epochs=10, warmup_initial_lr=1e-7)
+        return optimizer, lr_scheduler
 
     def plot_network_architecture(self):
         if self._do_i_compile():
@@ -869,7 +855,7 @@ class nnSeq2SeqTrainer(object):
         if isinstance(mod, OptimizedModule):
             mod = mod._orig_mod
 
-        mod.hyper_decoder.deep_supervision = enabled
+        mod.model.deep_supervision = enabled
 
     def on_train_start(self):
         if not self.was_initialized:
@@ -949,67 +935,23 @@ class nnSeq2SeqTrainer(object):
         # lrs are the same for all workers so we don't need to gather them in case of DDP training
         self.logger.log('lrs', self.optimizer.param_groups[0]['lr'], self.current_epoch)
 
-    def random_select_seq_code(self, properties):
-        output_code = []
-        for bid in range(len(properties)):
-            seq_id = random.choice([i for i in range(self.num_input_channels) if i not in properties[bid]['input_domain']])
-            output_code.append(seq_id)
-        output_code = torch.from_numpy(np.array(output_code)).to(dtype=torch.int64)
-        return output_code
-
-    def random_select_available_seq(self, data, properties):
-        output_data = []
-        output_code = []
-        other_code = []
-        output_mask = []
-        output_atlas = []
-        flag_atlas = []
-        for bid in range(len(properties)):
-            if self.tgt_seq_pool is None:
-                self.tgt_seq_pool = [0 for i in range(self.num_input_channels)]
-            inner_list = [v if i in properties[bid]['available_channel'] and i not in properties[bid]['input_domain'] else 1e+9 for i, v in enumerate(self.tgt_seq_pool)]
-            
-            if random.random()>0.5:
-                seq_id = random.choice(properties[bid]['available_channel'])
-            else:
-                seq_id = np.int64(inner_list.index(min(inner_list)))
-            output_data.append(data[bid:bid+1, seq_id:seq_id+1])
-            output_code.append(seq_id)
-            self.tgt_seq_pool[seq_id] += 1
-            other_code.append(random.choice([i for i in range(self.num_input_channels) if i!=seq_id]))
-            
-            # calculate overlap mask, but it's hard because some image do not have zero background
-            fg = torch.ones_like(data[0:1, 0:1])
-            bg = torch.ones_like(data[0:1, 0:1])
-            for seq_id in properties[bid]['available_channel']:
-                fg *= (data[bid:bid+1, seq_id:seq_id+1]>0)
-                bg *= (data[bid:bid+1, seq_id:seq_id+1]<=0)
-            output_mask.append(fg+bg)
-            atlas_id = 0 if len(properties[bid]['atlas_domain'])==0 else random.choice(properties[bid]['atlas_domain'])
-            output_atlas.append(data[bid:bid+1, atlas_id:atlas_id+1])
-            flag_atlas.append(1 if atlas_id in properties[bid]['available_channel'] else 0)
-
-        output_data = torch.cat(output_data, dim=0)
-        output_code = torch.from_numpy(np.array(output_code))
-        other_code = torch.from_numpy(np.array(other_code)).to(dtype=output_code.dtype)
-        output_mask = torch.cat(output_mask, dim=0)
-        output_atlas = torch.cat(output_atlas, dim=0)
-        flag_atlas = torch.from_numpy(np.array(flag_atlas))
-        return output_data, output_code, other_code, output_mask, output_atlas, flag_atlas
-    
-    def random_select_available_multiseqs(self, properties, tgt_id):
-        output_code = []
-        output_code_all = []
+    def random_select_available_multiseqs(self, properties):
+        output_code_src = []
+        output_code_tgt = []
         for bid in range(len(properties)):
             available_input = [i for i in properties[bid]['available_channel'] if i not in properties[bid]['output_domain']]
-            seqs_id = np.sort(random.sample(available_input, random.choice(
-                [i for i in range(1, max(2, len(available_input)))])))
-            output_code.append([1 if i in seqs_id and (i!=tgt_id[bid] or len(seqs_id)==1) else 0 for i in range(self.num_input_channels)])
-            output_code_all.append([1 if i in available_input else 0 for i in range(self.num_input_channels)])
+            available_output = [i for i in properties[bid]['available_channel'] if i not in properties[bid]['input_domain']]
+            if properties[bid]['missing'] == 'random':
+                select_num = random.choice([i for i in range(1, max(2, len(available_input)+1))])
+            else:
+                select_num = len(available_input) - properties[bid]['missing']
+            seqs_id = np.sort(random.sample(available_input, select_num))
+            output_code_src.append([1 if i in seqs_id else 0 for i in range(self.num_input_channels)])
+            output_code_tgt.append([1 if i in available_output else 0 for i in range(self.num_input_channels)])
             
-        output_code = torch.from_numpy(np.array(output_code))
-        output_code_all = torch.from_numpy(np.array(output_code_all))
-        return output_code_all, output_code
+        output_code_src = torch.from_numpy(np.array(output_code_src))
+        output_code_tgt = torch.from_numpy(np.array(output_code_tgt))
+        return output_code_src, output_code_tgt
     
     def generate_seg_weights(self, properties):
         output_weight = []
@@ -1022,213 +964,131 @@ class nnSeq2SeqTrainer(object):
         return output_weight
 
     def train_step(self, batch_id: int, batch: dict) -> dict:
-        ori_data = torch.clamp(batch['ori_data'], min=0)
+        ori_data = torch.clamp(batch['ori_data'], min=0, max=1)
         aug_data = batch['data']
         target = batch['target']
         properties = batch['properties']
+
         seg_weights = self.generate_seg_weights(properties)
+        src_code, tgt_code = self.random_select_available_multiseqs(properties)
 
-        tgt_data, tgt_code_int64, _, tgt_mask, atlas_data, flag_atlas = self.random_select_available_seq(ori_data, properties)
-        src_all_code, src_code = self.random_select_available_multiseqs(properties, tgt_code_int64)
-        rand_code_int64 = self.random_select_seq_code(properties)
-
-        src_data = aug_data.to(self.device, non_blocking=True)
-        tgt_data = tgt_data.to(self.device, non_blocking=True)
-        tgt_mask = tgt_mask.to(self.device, dtype=tgt_data.dtype, non_blocking=True)
-        src_all_code = src_all_code.to(self.device, dtype=tgt_data.dtype, non_blocking=True)
-        src_code = src_code.to(self.device, dtype=tgt_data.dtype, non_blocking=True)
-        tgt_code = F.one_hot(tgt_code_int64, num_classes=self.num_input_channels).to(self.device, dtype=tgt_data.dtype, non_blocking=True)
-        rand_code = F.one_hot(rand_code_int64, num_classes=self.num_input_channels).to(self.device, dtype=src_data.dtype, non_blocking=True)
-
-        atlas_data = atlas_data.to(self.device, non_blocking=True)
-        flag_atlas = flag_atlas.to(self.device, dtype=atlas_data.dtype, non_blocking=True).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+        src_data1 = ori_data.to(self.device, non_blocking=True)
+        src_data2 = aug_data.to(self.device, non_blocking=True)
+        tgt_data = ori_data.to(self.device, non_blocking=True)
+        tgt_code = tgt_code.to(self.device, dtype=src_data1.dtype, non_blocking=True)
+        src_code = src_code.to(self.device, dtype=src_data1.dtype, non_blocking=True)
         
         if isinstance(target, list):
             target = [i.to(self.device, non_blocking=True) for i in target]
         else:
             target = target.to(self.device, non_blocking=True)
-        seg_weights = seg_weights.to(self.device, dtype=src_data.dtype, non_blocking=True)
-
-        if self.img_dis is None:
-            self.img_dis = torch.zeros([self.num_input_channels]+list(tgt_data.shape[1:])).to(self.device, non_blocking=True)
-        img_rand_dis = []
-        for rand_id in range(rand_code_int64.shape[0]):
-            img_rand_dis.append(self.img_dis[rand_code_int64[rand_id]])
-        img_rand_dis = torch.stack(img_rand_dis, dim=0).detach()
-
-        # dis
-        if self.current_epoch>self.num_epochs_for_pretrain:
-            self.optimizer_d.zero_grad(set_to_none=True)
-            with torch.no_grad():
-                output_src2rand_all, output_src2rand_sub, _, _ = self.network(src_data, src_all_code, src_code, rand_code, with_latent=False)
-            pred_real = self.network.discriminator(img_rand_dis, rand_code)
-            if not self.enable_deep_supervision:
-                output_src2rand_all = [output_src2rand_all]
-                output_src2rand_sub = [output_src2rand_sub]
-            pred_fake1 = self.network.discriminator(torch.clamp(output_src2rand_all[0].detach(), min=0), rand_code)
-            pred_fake2 = self.network.discriminator(torch.clamp(output_src2rand_sub[0].detach(), min=0), rand_code)
-            ld = self.gan(pred_real, True) + 0.5*self.gan(pred_fake1, False) + 0.5*self.gan(pred_fake2, False)
-            ld.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.discriminator.parameters(), 12)
-            self.optimizer_d.step()
+        seg_weights = seg_weights.to(self.device, dtype=src_data1.dtype, non_blocking=True)
 
         # adv
         self.optimizer.zero_grad(set_to_none=True)
         
         #with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
-        output_src2tgt_all, output_src2tgt_sub, latent_src_all, latent_src_sub, latent_src_all_seg, latent_src_sub_seg, vq_loss_src, fusion_all, fusion_subgroup = self.network(src_data, src_all_code, src_code, tgt_code, with_latent=True)
-        mask_src_all = self.network.segmentor(latent_src_all_seg)
-        mask_src_sub = self.network.segmentor(latent_src_sub_seg)
+        with torch.no_grad():
+            if len(src_data1.shape)==4:
+                src_code_unsqueeze = src_code.unsqueeze(-1).unsqueeze(-1)
+            elif len(src_data1.shape)==5:
+                src_code_unsqueeze = src_code.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+            src_data1 = src_data1*src_code_unsqueeze
+            src_data2 = src_data2*src_code_unsqueeze
+
+            if self.enable_iteration:
+                output_src2tgt_all, mask_src_all = self.network(src_data1, src_data2, src_code)
+
+                bernoulli_mask = torch.bernoulli(torch.full(src_code_unsqueeze.shape, 0.5)).to(self.device)
+
+                src_data1 = src_data1*src_code_unsqueeze + (1-src_code_unsqueeze)*torch.clamp(output_src2tgt_all[0], 0, 1)*bernoulli_mask
+                src_data2 = src_data2*src_code_unsqueeze + (1-src_code_unsqueeze)*torch.clamp(output_src2tgt_all[0], 0, 1)*bernoulli_mask
+
+        output_src2tgt_all, mask_src_all, vq_loss = self.network(src_data1.detach(), src_data2.detach(), src_code, is_training=True)
+        target = target[:len(mask_src_all)]
 
         # del data
         #int_datas = [F.interpolate(int_data, scale_factor=1/2**i, mode='nearest') for i in range(len(target))]
         if self.enable_deep_supervision:
-            tgt_datas = [F.interpolate(tgt_data, scale_factor=1/2**i, mode='bilinear' if len(tgt_data.shape)==4 else 'trilinear') for i in range(len(target))]
-            tgt_masks = [F.interpolate(tgt_mask, scale_factor=1/2**i, mode='nearest') for i in range(len(target))]
+            tgt_datas = [F.interpolate(tgt_data, scale_factor=1/2**i, mode='bilinear' if len(tgt_data.shape)==4 else 'trilinear') for i in range(len(output_src2tgt_all))]
+            tgt_masks = [F.interpolate(torch.ones_like(tgt_data), scale_factor=1/2**i, mode='nearest') for i in range(len(output_src2tgt_all))]
             if self.train_segmentation_only:
-                l = self.seg_loss(mask_src_all, target, [seg_weights for _ in target]) + \
-                    self.seg_loss(mask_src_sub, target, [seg_weights for _ in target])
+                l = self.seg_loss(mask_src_all, target, [seg_weights for _ in target]) + self.seg_loss(mask_src_all, target, [seg_weights for _ in target])
             elif self.train_translation_only:
-                l = self.loss(output_src2tgt_all, tgt_datas, tgt_masks) + \
-                    self.loss(output_src2tgt_sub, tgt_datas, tgt_masks)
+                l = self.loss([out*tgt_code.unsqueeze(-1).unsqueeze(-1) if len(out.shape)==4 else out*tgt_code.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1) for out in output_src2tgt_all], tgt_datas, tgt_masks)
             else:
-                l = self.loss(output_src2tgt_all, tgt_datas, tgt_masks) + \
-                    self.loss(output_src2tgt_sub, tgt_datas, tgt_masks) + \
-                    self.seg_loss(mask_src_all, target, [seg_weights for _ in target]) + \
-                    self.seg_loss(mask_src_sub, target, [seg_weights for _ in target])
+                l = self.loss([out*tgt_code.unsqueeze(-1).unsqueeze(-1) if len(out.shape)==4 else out*tgt_code.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1) for out in output_src2tgt_all], tgt_datas, tgt_masks) + \
+                    self.seg_loss(mask_src_all, target, [seg_weights for _ in target])
         else:
             if self.train_segmentation_only:
-                l = self.seg_loss(0, mask_src_all, target, seg_weights) + \
-                    self.seg_loss(0, mask_src_sub, target, seg_weights)
+                l = self.seg_loss(0, mask_src_all, target, seg_weights)
             elif self.train_translation_only:
-                l = self.loss(0, output_src2tgt_all, tgt_data, tgt_mask) + \
-                    self.loss(0, output_src2tgt_sub, tgt_data, tgt_mask)
+                l = self.loss(0, output_src2tgt_all, tgt_data, torch.ones_like(output_src2tgt_all))
             else:
-                l = self.loss(0, output_src2tgt_all, tgt_data, tgt_mask) + \
-                    self.loss(0, output_src2tgt_sub, tgt_data, tgt_mask) + \
-                    self.seg_loss(0, mask_src_all, target, seg_weights) + \
-                    self.seg_loss(0, mask_src_sub, target, seg_weights)
+                l = self.loss(0, output_src2tgt_all, tgt_data, torch.ones_like(output_src2tgt_all)) + \
+                    self.seg_loss(0, mask_src_all, target, seg_weights)
+        l += vq_loss
 
-        l = l + vq_loss_src   
-        if not self.train_segmentation_only:
-            l = l + \
-                nn.MSELoss()(fusion_all[1], latent_src_all[-1].detach()) + \
-                nn.MSELoss()(fusion_subgroup[1], latent_src_sub[-1].detach()) + \
-                nn.MSELoss()(fusion_all[0]*flag_atlas*tgt_mask, atlas_data*flag_atlas*tgt_mask) + \
-                nn.MSELoss()(fusion_subgroup[0]*flag_atlas*tgt_mask, atlas_data*flag_atlas*tgt_mask)
-
-            
-        if self.current_epoch>self.num_epochs_for_pretrain:
-            output_src2rand_all, _ = self.network.hyper_decoder(latent_src_all, rand_code)
-            output_src2rand_sub, _ = self.network.hyper_decoder(latent_src_sub, rand_code)
-            if not self.enable_deep_supervision:
-                output_src2rand_all = [output_src2rand_all]
-                output_src2rand_sub = [output_src2rand_sub]
-            pred_fake1 = self.network.discriminator(torch.clamp(output_src2rand_all[0], min=0), rand_code)
-            pred_fake2 = self.network.discriminator(torch.clamp(output_src2rand_sub[0], min=0), rand_code)
-            l += (self.gan(pred_fake1, True) + self.gan(pred_fake2, True) + \
-                nn.MSELoss()(output_src2rand_sub[0], torch.clamp(output_src2rand_all[0].detach(), min=0)) + \
-                nn.MSELoss()(output_src2rand_all[0], torch.clamp(output_src2rand_sub[0].detach(), min=0)))
-        else:
-            if not self.enable_deep_supervision:
-                output_src2rand_all = [output_src2tgt_all]
-                output_src2rand_sub = [output_src2tgt_sub]
-            else:
-                output_src2rand_all = output_src2tgt_all
-                output_src2rand_sub = output_src2tgt_sub
-            
         if self.grad_scaler is not None:
             self.grad_scaler.scale(l).backward()
             self.grad_scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.network.image_encoder.parameters(), 12)
-            torch.nn.utils.clip_grad_norm_(self.network.hyper_decoder.parameters(), 12)
-            torch.nn.utils.clip_grad_norm_(self.network.segmentor.parameters(), 12)
+            torch.nn.utils.clip_grad_norm_(self.network.parameters(), 1.0)
             self.grad_scaler.step(self.optimizer)
             self.grad_scaler.update()
         else:
             l.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.image_encoder.parameters(), 12)
-            torch.nn.utils.clip_grad_norm_(self.network.hyper_decoder.parameters(), 12)
-            torch.nn.utils.clip_grad_norm_(self.network.segmentor.parameters(), 12)
+            torch.nn.utils.clip_grad_norm_(self.network.parameters(), 1.0)
             self.optimizer.step()
         
         self.network_ema.step(self.network.parameters())
-        
-        for tgt_id in range(tgt_code_int64.shape[0]):
-            if torch.std(tgt_data[tgt_id])>0:
-                self.img_dis[tgt_code_int64[tgt_id]] = tgt_data[tgt_id]
-            
 
+        if torch.isnan(l).any():
+            raise RuntimeError('Loss is NaN!')
+
+        
         vis_path = os.path.join(self.output_folder, 'visualization')
         os.makedirs(vis_path, exist_ok=True)
         vis_save_path = os.path.join(vis_path, 'epoch_{}.jpg'.format(self.current_epoch))
         if batch_id==0:
             if not self.enable_deep_supervision:
                 output_src2tgt_all = [output_src2tgt_all]
-                output_src2tgt_sub = [output_src2tgt_sub]
                 mask_src_all = [mask_src_all]
-                mask_src_sub = [mask_src_sub]
                 target = [target]
 
             with torch.no_grad():
                 max_label = mask_src_all[0].shape[1] - 1
                 mask_src_all = [torch.argmax(m, dim=1, keepdim=True)/max_label for m in mask_src_all]
-                mask_src_sub = [torch.argmax(m, dim=1, keepdim=True)/max_label for m in mask_src_sub]
-                if len(src_data.shape)==5:
-                    sd = src_data.shape[2]//2
-                    vimage = torch.stack([
-                        tgt_data[:,:,sd], output_src2tgt_all[0][:,:,sd], output_src2tgt_sub[0][:,:,sd], torch.abs(output_src2tgt_all[0]-output_src2tgt_sub[0])[:,:,sd],
-                        img_rand_dis[:,:,sd], output_src2rand_all[0][:,:,sd], output_src2rand_sub[0][:,:,sd], torch.abs(output_src2rand_all[0]-output_src2rand_sub[0])[:,:,sd],
-                        target[0][:,:,sd]/max_label, mask_src_all[0][:,:,sd], mask_src_sub[0][:,:,sd], tgt_mask[:,:,sd],
-                        tgt_mask[:,:,sd], fusion_all[0][:,0:1,sd], fusion_all[0][:,1:2,sd], fusion_all[0][:,2:3,sd],
-                    ], dim=1).reshape(-1,1,*(src_data.shape[3:]))
+                if len(src_data1.shape)==5:
+                    sd = src_data1.shape[2]//2
+                    vimage = torch.cat([
+                        tgt_data[:,:,sd], output_src2tgt_all[0][:,:,sd], target[0][:,:,sd]/max_label, mask_src_all[0][:,:,sd],
+                    ], dim=1).reshape(-1,1,*(src_data1.shape[3:]))
                     vimage = torch.clamp(vimage, min=0, max=1)
-                    torchvision.utils.save_image(vimage, vis_save_path)
-                    torchvision.utils.save_image(self.img_dis[:,:,sd], os.path.join(vis_path, 'discriminator.jpg'))
-                    for vi, (lat_all, lat_sub) in enumerate(zip(latent_src_all, latent_src_sub)):
-                        sd = lat_all.shape[2]//2
-                        vimage = torch.stack([
-                            lat_all[:,:,sd], lat_sub[:,:,sd]
-                        ], dim=1).reshape(-1,lat_all.shape[1],*(lat_all.shape[3:]))
-                        torchvision.utils.save_image(vimage, os.path.join(vis_path, 'latent_space_{}.jpg'.format(vi)))
-                    for vi, (out_all, out_sub, out_tgt, m_all, m_sub, m_tgt) in enumerate(zip(output_src2tgt_all, output_src2tgt_sub, tgt_datas, mask_src_all, mask_src_sub, target)):
-                        sd = out_all.shape[2]//2
-                        vimage = torch.stack([
-                            out_all[:,:,sd], out_tgt[:,:,sd], out_sub[:,:,sd], out_tgt[:,:,sd], m_all[:,:,sd], m_tgt[:,:,sd]/max_label, m_sub[:,:,sd], m_tgt[:,:,sd]/max_label
-                        ], dim=1).reshape(-1,1,*(out_all.shape[3:]))
-                        vimage = torch.clamp(vimage, min=0, max=1)
-                        torchvision.utils.save_image(vimage, os.path.join(vis_path, 'deep_{}.jpg'.format(vi)))
-                else:
-                    vimage = torch.stack([
-                        tgt_data, output_src2tgt_all[0], output_src2tgt_sub[0], torch.abs(output_src2tgt_all[0]-output_src2tgt_sub[0]),
-                        img_rand_dis, output_src2rand_all[0], output_src2rand_sub[0], torch.abs(output_src2rand_all[0]-output_src2rand_sub[0]),
-                        target[0]/max_label, mask_src_all[0], mask_src_sub[0], tgt_mask,
-                        tgt_mask, fusion_all[0][:, 0:1], fusion_all[0][:, 1:2], fusion_all[0][:, 2:3],
-                    ], dim=1).reshape(-1,1,*(src_data.shape[2:]))
-                    vimage = torch.clamp(vimage, min=0, max=1)
-                    torchvision.utils.save_image(vimage, vis_save_path)
+                    torchvision.utils.save_image(vimage, vis_save_path, nrow=tgt_data.shape[1]*2+2)
 
-                    torchvision.utils.save_image(self.img_dis, os.path.join(vis_path, 'discriminator.jpg'))
-
-                    vimage = torch.stack([
-                            fusion_all[0], fusion_all[1], fusion_subgroup[0], fusion_subgroup[1], 
-                        ], dim=1).reshape(-1,*(fusion_all[0].shape[1:]))
-                    vimage = torch.clamp(vimage, min=0, max=1)
-                    torchvision.utils.save_image(vimage, os.path.join(vis_path, 'fusion.jpg'))
-
-                    for vi, (lat_all, lat_sub) in enumerate(zip(latent_src_all, latent_src_sub)):
-                        vimage = torch.stack([
-                            lat_all, lat_sub
-                        ], dim=1).reshape(-1,*(lat_all.shape[1:]))
-                        torchvision.utils.save_image(vimage, os.path.join(vis_path, 'latent_space_{}.jpg'.format(vi)))
-                    
                     if self.enable_deep_supervision:
-                        for vi, (out_all, out_sub, out_tgt, m_all, m_sub, m_tgt) in enumerate(zip(output_src2tgt_all, output_src2tgt_sub, tgt_datas, mask_src_all, mask_src_sub, target)):
-                            vimage = torch.stack([
-                                out_all, out_tgt, out_sub, out_tgt, m_all, m_tgt/max_label, m_sub, m_tgt/max_label
+                        for vi, (out_all, out_tgt, m_all, m_tgt) in enumerate(zip(output_src2tgt_all, tgt_datas, mask_src_all, target)):
+                            sd = out_all.shape[2]//2
+                            vimage = torch.cat([
+                                out_tgt[:,:,sd], out_all[:,:,sd], m_tgt[:,:,sd]/max_label, m_all[:,:,sd],
+                            ], dim=1).reshape(-1,1,*(out_all.shape[3:]))
+                            vimage = torch.clamp(vimage, min=0, max=1)
+                            torchvision.utils.save_image(vimage, os.path.join(vis_path, 'deep_{}.jpg'.format(vi)), nrow=tgt_data.shape[1]*2+2)
+                    
+                else:
+                    vimage = torch.cat([
+                        tgt_data, output_src2tgt_all[0], target[0]/max_label, mask_src_all[0],
+                    ], dim=1).reshape(-1,1,*(src_data1.shape[2:]))
+                    vimage = torch.clamp(vimage, min=0, max=1)
+                    torchvision.utils.save_image(vimage, vis_save_path, nrow=tgt_data.shape[1]*2+2)
+
+                    if self.enable_deep_supervision:
+                        for vi, (out_all, out_tgt, m_all, m_tgt) in enumerate(zip(output_src2tgt_all, tgt_datas, mask_src_all, target)):
+                            vimage = torch.cat([
+                                out_tgt, out_all, m_tgt/max_label, m_all,
                             ], dim=1).reshape(-1,1,*(out_all.shape[2:]))
                             vimage = torch.clamp(vimage, min=0, max=1)
-                            torchvision.utils.save_image(vimage, os.path.join(vis_path, 'deep_{}.jpg'.format(vi)))
+                            torchvision.utils.save_image(vimage, os.path.join(vis_path, 'deep_{}.jpg'.format(vi)), nrow=tgt_data.shape[1]*2+2)
         return {'loss': l.detach().cpu().numpy()}
 
     def on_train_epoch_end(self, train_outputs: List[dict]):
@@ -1247,20 +1107,17 @@ class nnSeq2SeqTrainer(object):
         self.network.eval()
 
     def validation_step(self, batch: dict) -> dict:
-        data = batch['data']
+        data = torch.clamp(batch['data'], min=0, max=1)
         target = batch['target']
         properties = batch['properties']
         seg_weights = self.generate_seg_weights(properties)
 
-        tgt_data, tgt_code_int64, _, tgt_mask, _, _ = self.random_select_available_seq(data, properties)
-        src_all_code, src_code = self.random_select_available_multiseqs(properties, tgt_code_int64)
+        src_code, tgt_code = self.random_select_available_multiseqs(properties)
         
         src_data = data.to(self.device, non_blocking=True)
-        tgt_data = tgt_data.to(self.device, non_blocking=True)
-        tgt_mask = tgt_mask.to(self.device, dtype=tgt_data.dtype, non_blocking=True)
-        src_all_code = src_all_code.to(self.device, dtype=tgt_data.dtype, non_blocking=True)
+        tgt_data = data.to(self.device, non_blocking=True)
+        tgt_code = tgt_code.to(self.device, dtype=tgt_data.dtype, non_blocking=True)
         src_code = src_code.to(self.device, dtype=tgt_data.dtype, non_blocking=True)
-        tgt_code = F.one_hot(tgt_code_int64, num_classes=self.num_input_channels).to(self.device, dtype=tgt_data.dtype, non_blocking=True)
 
         if isinstance(target, list):
             target = [i.to(self.device, non_blocking=True) for i in target]
@@ -1272,19 +1129,31 @@ class nnSeq2SeqTrainer(object):
         # If the device_type is 'cpu' then it's slow as heck and needs to be disabled.
         # If the device_type is 'mps' then it will complain that mps is not implemented, even if enabled=False is set. Whyyyyyyy. (this is why we don't make use of enabled=False)
         # So autocast will only be active if we have a cuda device.
-        with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
-            _, output, _, _, latent_src_all_seg, _, _, _, _ = self.network(src_data, src_all_code, src_code, tgt_code,
-                                                                           with_latent=True,
-                                                                           latent_focal='dispersion' if self.network.hyper_decoder.focal_mode=='focal_mix' else None)
-            mask_src_all = self.network.segmentor(latent_src_all_seg)
+        #with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
+        with torch.no_grad():
+            if len(src_data.shape)==4:
+                src_code_unsqueeze = src_code.unsqueeze(-1).unsqueeze(-1)
+            elif len(src_data.shape)==5:
+                src_code_unsqueeze = src_code.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+
+            src_data = src_data*src_code_unsqueeze
+            if self.enable_iteration:
+                output, mask_src_all = self.network(src_data, src_data, src_code)
+                src_data = src_data*src_code_unsqueeze + (1-src_code_unsqueeze)*torch.clamp(output[0], 0, 1)
+            output, mask_src_all = self.network(src_data, src_data, src_code)
+
+
+            target = target[:len(mask_src_all)]
+            output = [out*tgt_code.unsqueeze(-1).unsqueeze(-1) if len(out.shape)==4 else out*tgt_code.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1) for out in output]
+            tgt_data = tgt_data*tgt_code.unsqueeze(-1).unsqueeze(-1) if len(tgt_data.shape)==4 else tgt_data*tgt_code.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
             del data
             if self.train_segmentation_only:
                 l = self.seg_loss(mask_src_all, target, [seg_weights for _ in target])
             else:
                 l = self.loss(
                     output,
-                    [F.interpolate(tgt_data, scale_factor=1/2**i, mode='bilinear' if len(tgt_data.shape)==4 else 'trilinear') for i in range(len(target))],
-                    [F.interpolate(tgt_mask, scale_factor=1/2**i, mode='bilinear' if len(tgt_data.shape)==4 else 'trilinear') for i in range(len(target))])
+                    [F.interpolate(tgt_data, scale_factor=1/2**i, mode='bilinear' if len(tgt_data.shape)==4 else 'trilinear') for i in range(len(output))],
+                    [F.interpolate(torch.ones_like(tgt_data), scale_factor=1/2**i, mode='bilinear' if len(tgt_data.shape)==4 else 'trilinear') for i in range(len(output))])
 
         # we only need the output with the highest output resolution (if DS enabled)
         if self.enable_deep_supervision:
@@ -1295,8 +1164,8 @@ class nnSeq2SeqTrainer(object):
         if self.train_segmentation_only:
             psnr = -l
         else:
-            psnr = torch_PSNR(tgt_data*tgt_mask, output*tgt_mask, data_range=1)
-
+            psnr = torch_PSNR(tgt_data, output, data_range=1)
+        
         # # the following is needed for online evaluation. Fake dice (green line)
         # axes = [0] + list(range(2, output.ndim))
 

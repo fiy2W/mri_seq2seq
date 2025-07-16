@@ -73,7 +73,7 @@ def preprocess_entry():
     parser.add_argument('-d', nargs='+', type=int,
                         help="[REQUIRED] List of dataset IDs. Example: 2 4 5. This will run fingerprint extraction, experiment "
                              "planning and preprocessing for these datasets. Can of course also be just one dataset")
-    parser.add_argument('-plans_name', default='nnUNetPlans', required=False,
+    parser.add_argument('-plans_name', default='nnSeq2SeqPlans', required=False,
                         help='[OPTIONAL] You can use this to specify a custom plans file that you may have generated')
     parser.add_argument('-c', required=False, default=['2d', '3d'], nargs='+',
                         help='[OPTIONAL] Configurations for which the preprocessing should be run. Default: 2d 3d.')
@@ -197,3 +197,4 @@ def plan_and_preprocess_entry():
 
 if __name__ == '__main__':
     plan_and_preprocess_entry()
+    #preprocess_entry()

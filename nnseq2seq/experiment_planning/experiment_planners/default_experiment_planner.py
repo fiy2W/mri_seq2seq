@@ -61,7 +61,7 @@ class ExperimentPlanner(object):
         self.UNet_featuremap_min_edge_length = 4
         #self.UNet_blocks_per_stage_encoder = (2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2)
         #self.UNet_blocks_per_stage_decoder = (2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2)
-        self.UNet_min_batch_size = 1
+        self.UNet_min_batch_size = 2
         self.UNet_max_features_2d = 512
         self.UNet_max_features_3d = 320
         self.max_dataset_covered = 0.05 # we limit the batch size so that no more than 5% of the dataset can be seen
@@ -280,154 +280,19 @@ class ExperimentPlanner(object):
 
         #norm = get_matching_instancenorm(unet_conv_op)
         self.UNet_class = self.UNet_class_2d if len(spacing) == 2 else self.UNet_class_3d
-        if len(spacing)==2:
-            architecture_kwargs = {
-                'network_class_name': self.UNet_class.__module__ + '.' + self.UNet_class.__name__,
-                'arch_kwargs': {
-                    'image_encoder': {
-                        'in_channels': 1,
-                        'conv_channels': [32, 64, 128, 256, 256],
-                        'conv_kernel': [3, 2, 2, 2, 2],
-                        'conv_stride': [1, 2, 2, 2, 2],
-                        'resblock_n': [2, 2, 4, 4, 4],
-                        'resblock_kernel': [3, 3, 3, 3, 3],
-                        'resblock_padding': [1, 1, 1, 1, 1],
-                        'layer_scale_init_value': 0.000001,
-                        'hyper_conv_dim': 16,
-                        'latent_space_dim': 3,
-                        'style_dim': num_input_channels,
-                        'vq_n_embed': 8192,
-                        'vq_beta': 0.25,
-                    },
-                    'image_decoder': {
-                        'out_channels': 1,
-                        'conv_channels': [256, 256, 128, 64, 32],
-                        'conv_kernel': [3, 3, 3, 3, 3],
-                        'conv_stride': [2, 2, 2, 2, 1],
-                        'resblock_n': [4, 4, 4, 2, 2],
-                        'resblock_kernel': [3, 3, 3, 3, 3],
-                        'resblock_padding': [1, 1, 1, 1, 1],
-                        'layer_scale_init_value': 0.000001,
-                        'hyper_conv_dim': 16,
-                        'latent_space_dim': 3,
-                        'style_dim': num_input_channels,
-                        'deep_supervision': True,
-                        'focal_mode': 'focal_mix', # [dispersion, focal_x1, focal_x2, focal_x4, focal_x8, focal_x16, focal_mix]
-                    },
-                    'segmentor': {
-                        'in_channels': 1,
-                        'num_classes': len(self.dataset_json['labels'].keys()),
-                        'conv_channels': [256, 256, 128, 64, 32],
-                        'conv_kernel': [3, 3, 3, 3, 3],
-                        'conv_stride': [2, 2, 2, 2, 1],
-                        'resblock_n': [4, 4, 4, 2, 2],
-                        'resblock_kernel': [3, 3, 3, 3, 3],
-                        'resblock_padding': [1, 1, 1, 1, 1],
-                        'layer_scale_init_value': 0.000001,
-                        'latent_space_dim': 3,
-                        'deep_supervision': True,
-                    },
-                    'discriminator': {
-                        'in_channels': 1,
-                        'ndf': 32,
-                        'hyper_conv_dim': 16,
-                        'style_dim': num_input_channels,
-                        'layer_scale_init_value': 0.000001,
-                        'n_layers': 3,
-                        'kw': 4,
-                        'padw': 1,
-                    },
-                    #'n_stages': num_stages,
-                    #'features_per_stage': _features_per_stage(num_stages, max_num_features),
-                    #'conv_op': unet_conv_op.__module__ + '.' + unet_conv_op.__name__,
-                    #'kernel_sizes': conv_kernel_sizes,
-                    #'strides': pool_op_kernel_sizes,
-                    #'n_conv_per_stage': self.UNet_blocks_per_stage_encoder[:num_stages],
-                    #'n_conv_per_stage_decoder': self.UNet_blocks_per_stage_decoder[:num_stages - 1],
-                    #'conv_bias': True,
-                    #'norm_op': norm.__module__ + '.' + norm.__name__,
-                    #'norm_op_kwargs': {'eps': 1e-5, 'affine': True},
-                    #'dropout_op': None,
-                    #'dropout_op_kwargs': None,
-                    #'nonlin': 'torch.nn.LeakyReLU',
-                    #'nonlin_kwargs': {'inplace': True},
-                },
-                '_kw_requires_import': ('conv_op', 'norm_op', 'dropout_op', 'nonlin'),
-            }
-        else:
-                architecture_kwargs = {
-                'network_class_name': self.UNet_class.__module__ + '.' + self.UNet_class.__name__,
-                'arch_kwargs': {
-                    'image_encoder': {
-                        'in_channels': 1,
-                        'conv_channels': [16, 32, 64, 128, 256],
-                        'conv_kernel': [3, 2, 2, 2, 2],
-                        'conv_stride': [1, 2, 2, 2, 2],
-                        'resblock_n': [0, 1, 2, 2, 2],
-                        'resblock_kernel': [3, 3, 3, 3, 3],
-                        'resblock_padding': [1, 1, 1, 1, 1],
-                        'layer_scale_init_value': 0.000001,
-                        'hyper_conv_dim': 16,
-                        'latent_space_dim': 3,
-                        'style_dim': num_input_channels,
-                        'vq_n_embed': 8192,
-                        'vq_beta': 0.25,
-                    },
-                    'image_decoder': {
-                        'out_channels': 1,
-                        'conv_channels': [256, 128, 64, 32, 16],
-                        'conv_kernel': [3, 3, 3, 3, 3],
-                        'conv_stride': [2, 2, 2, 2, 1],
-                        'resblock_n': [2, 2, 2, 1, 0],
-                        'resblock_kernel': [3, 3, 3, 3, 3],
-                        'resblock_padding': [1, 1, 1, 1, 1],
-                        'layer_scale_init_value': 0.000001,
-                        'hyper_conv_dim': 16,
-                        'latent_space_dim': 3,
-                        'style_dim': num_input_channels,
-                        'deep_supervision': True,
-                        'focal_mode': 'focal_mix', # [dispersion, focal_x1, focal_x2, focal_x4, focal_x8, focal_x16, focal_mix]
-                    },
-                    'segmentor': {
-                        'in_channels': 1,
-                        'num_classes': len(self.dataset_json['labels'].keys()),
-                        'conv_channels': [256, 128, 64, 32, 16],
-                        'conv_kernel': [3, 3, 3, 3, 3],
-                        'conv_stride': [2, 2, 2, 2, 1],
-                        'resblock_n': [2, 2, 2, 1, 0],
-                        'resblock_kernel': [3, 3, 3, 3, 3],
-                        'resblock_padding': [1, 1, 1, 1, 1],
-                        'layer_scale_init_value': 0.000001,
-                        'latent_space_dim': 3,
-                        'deep_supervision': True,
-                    },
-                    'discriminator': {
-                        'in_channels': 1,
-                        'ndf': 16,
-                        'hyper_conv_dim': 16,
-                        'style_dim': num_input_channels,
-                        'layer_scale_init_value': 0.000001,
-                        'n_layers': 3,
-                        'kw': 4,
-                        'padw': 1,
-                    },
-                    #'n_stages': num_stages,
-                    #'features_per_stage': _features_per_stage(num_stages, max_num_features),
-                    #'conv_op': unet_conv_op.__module__ + '.' + unet_conv_op.__name__,
-                    #'kernel_sizes': conv_kernel_sizes,
-                    #'strides': pool_op_kernel_sizes,
-                    #'n_conv_per_stage': self.UNet_blocks_per_stage_encoder[:num_stages],
-                    #'n_conv_per_stage_decoder': self.UNet_blocks_per_stage_decoder[:num_stages - 1],
-                    #'conv_bias': True,
-                    #'norm_op': norm.__module__ + '.' + norm.__name__,
-                    #'norm_op_kwargs': {'eps': 1e-5, 'affine': True},
-                    #'dropout_op': None,
-                    #'dropout_op_kwargs': None,
-                    #'nonlin': 'torch.nn.LeakyReLU',
-                    #'nonlin_kwargs': {'inplace': True},
-                },
-                '_kw_requires_import': ('conv_op', 'norm_op', 'dropout_op', 'nonlin'),
-            }
+        
+        architecture_kwargs = {
+            'network_class_name': self.UNet_class.__module__ + '.' + self.UNet_class.__name__,
+            'arch_kwargs': {
+                'in_channels': num_input_channels,
+                'conv_channels': [32, 64, 128] if len(spacing) == 2 else [16, 32, 64],
+                'num_classes': len(self.dataset_json['labels'].keys()),
+                'hyper_conv_dim': 8,
+                'style_dim': num_input_channels,
+                'deep_supervision': True,
+            },
+            '_kw_requires_import': ('conv_op', 'norm_op', 'dropout_op', 'nonlin'),
+        }
 
         # now estimate vram consumption
         if _keygen(patch_size, pool_op_kernel_sizes) in _cache.keys():
@@ -515,6 +380,16 @@ class ExperimentPlanner(object):
 
         normalization_schemes, mask_is_used_for_norm = \
             self.determine_normalization_scheme_and_whether_mask_is_used_for_norm()
+        
+
+        if len(patch_size)==3:
+            patch_size = [96, 96, 96]
+            batch_size = 2
+        else:
+            min_patch_size = min(patch_size)
+            patch_size = [min_patch_size, min_patch_size]
+            batch_size = 8
+
 
         plan = {
             'data_identifier': data_identifier,

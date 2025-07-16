@@ -43,7 +43,7 @@ class SoftDiceLoss(nn.Module):
         nominator = 2 * tp
         denominator = 2 * tp + fp + fn
 
-        dc = (nominator + self.smooth) / (torch.clip(denominator + self.smooth, 1e-8))
+        dc = (nominator + self.smooth) / (torch.clip(denominator + self.smooth, self.smooth))
 
         if not self.do_bg:
             if self.batch_dice:

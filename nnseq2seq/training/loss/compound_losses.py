@@ -39,17 +39,18 @@ class L1_SSIM_and_Perceptual_loss(nn.Module):
         l1_loss = self.l1(net_output*mask, target*mask)
         ssim_loss = self.ssim(net_output*mask, target*mask, target.max())
         result = self.weight_l1 * l1_loss + self.weight_ssim * ssim_loss
-        if deep==0:
-            if self.spatial_dims==2:
-                per_loss = self.perceptual(net_output, target, mask)
-            else:
-                d = target.shape[2]//2
-                w = target.shape[3]//2
-                h = target.shape[4]//2
-                per_loss = (self.perceptual(net_output[:,:,d], target[:,:,d], mask[:,:,d]) + \
-                    self.perceptual(net_output[:,:,:,w], target[:,:,:,w], mask[:,:,:,w]) + \
-                    self.perceptual(net_output[:,:,:,:,h], target[:,:,:,:,h], mask[:,:,:,:,h]))/3
-            result += self.weight_perceptual * per_loss
+        
+        # if deep==0:
+        #     if self.spatial_dims==2:
+        #         per_loss = self.perceptual(net_output, target, mask)
+        #     else:
+        #         d = target.shape[2]//2
+        #         w = target.shape[3]//2
+        #         h = target.shape[4]//2
+        #         per_loss = (self.perceptual(net_output[:,:,d], target[:,:,d], mask[:,:,d]) + \
+        #             self.perceptual(net_output[:,:,:,w], target[:,:,:,w], mask[:,:,:,w]) + \
+        #             self.perceptual(net_output[:,:,:,:,h], target[:,:,:,:,h], mask[:,:,:,:,h]))/3
+        #     result += self.weight_perceptual * per_loss
         return result
 
 

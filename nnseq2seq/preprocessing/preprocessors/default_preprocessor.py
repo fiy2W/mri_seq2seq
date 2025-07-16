@@ -118,9 +118,9 @@ class DefaultPreprocessor(object):
         data, data_properties = rw.read_images(image_files)
         data_properties['available_channel'] = [np.int64(os.path.basename(fname).split('_')[-1].replace(dataset_json['file_ending'], '')) for fname in image_files]
         data_properties['num_channel'] = dataset_json['numChannel']
+        data_properties['missing'] = dataset_json['missing']
         data_properties['input_domain'] = [ac for ac in range(dataset_json['numChannel']) if 'input' in dataset_json['channel_names'][str(ac)]]
         data_properties['output_domain'] = [ac for ac in range(dataset_json['numChannel']) if 'output' in dataset_json['channel_names'][str(ac)]]
-        data_properties['atlas_domain'] = [ac for ac in range(dataset_json['numChannel']) if 'atlas' in dataset_json['channel_names'][str(ac)]]
         
         # if possible, load seg
         if seg_file is not None:

@@ -27,7 +27,7 @@ If you already know what configuration you need, you can also specify that with 
 
 `nnSeq2Seq_plan_and_preprocess` will create a new subfolder in your `nnSeq2Seq_preprocessed` folder named after the dataset. Once the command is completed, there will be a `dataset_fingerprint.json` file and a `nnSeq2SeqPlans.json` file for you to look at (in case you are interested!). Subfolders containing the preprocessed data for your network configurations will also be created.
 
-Automatic configuration is expected to occupy no more than 24G of GPU memory. If you want to use more or less GPU memory, please modify the `batch_size` or `patch_size` in `nnSeq2SeqPlans.json`. Note that, `patch_size` needs to be divisible by 16.
+If you want to use more or less GPU memory, please modify the `batch_size` or `patch_size` in `nnSeq2SeqPlans.json`. Note that, `patch_size` needs to be divisible by 4.
 
 ```json
 {
@@ -35,7 +35,7 @@ Automatic configuration is expected to occupy no more than 24G of GPU memory. If
     "configurations": {
         "2d": {
             ...
-            "batch_size": 4,
+            "batch_size": 8,
             "patch_size": [
                 192,
                 160
@@ -44,11 +44,11 @@ Automatic configuration is expected to occupy no more than 24G of GPU memory. If
         },
         "3d": {
             ...
-            "batch_size": 1,
+            "batch_size": 2,
             "patch_size": [
-                64,
-                80,
-                64
+                96,
+                96,
+                96
             ],
             ...
         },
@@ -70,10 +70,6 @@ python nnseq2seq/run/run_training.py \
 nnSeq2Seq_train -dataset_name_or_id DATASET_ID -configuration CONFIG -fold FOLD_ID
 ```
 nnSeq2Seq stores a checkpoint every 50 epochs. If you need to continue a previous training, just add a `--c` to the training command.
-
-**Tips:**
-- It is recommended to use a `2d` configuration, because the performance of a `3d` configuration needs to be verified.
-- It is recommended to train only one fold rather than five folds, because the performance of five folds needs to be verified.
 
 The trained models will be written to the `nnSeq2Seq_results` folder. Each training obtains an automatically generated output folder name:
 
@@ -113,24 +109,11 @@ In each model training output folder (each of the fold_x folder), the following 
   - epoch_X.jpg: synthesis images and segmentation at epoch X
     |  |  |  |  |  |  |  |  |
     |--|--|--|--|--|--|--|--|
-    | tgt | src_all2tgt | src_sub2tgt | abs(src_all2tgt-src_sub2tgt) | rand | src_all2rand | src_sub2rand | abs(src_all2rand-src_sub2rand) |
-    | label | src_all2mask | src_sub2mask | tgt_mask | tgt_mask | fusion_all[0] | fusion_all[1] | fusion_all[2] |
-  - latent_space_X.jpg: vector quantized common (VQC)-latent space
-    |  |  |
-    |--|--|
-    | latent_src_all | latent_src_sub |
-  - discriminator.jpg: sample images for each channel
-    |  |  |  |  |
-    |--|--|--|--|
-    | channel_0 | channel_1 | ... | channel_N |
+    | src_1 | src_2 | ... | pred_1 | pred_2 | ... | mask | pred_mask |
   - deep_X.jpg: synthesis images of deep supervision
     |  |  |  |  |  |  |  |  |
     |--|--|--|--|--|--|--|--|
-    | src_all2tgt | tgt | src_sub2tgt | tgt | src_all2mask | label | src_sub2mask | label |
-  - fusion.jpg: fusion images and latent space
-    |  |  |  |  |
-    |--|--|--|--|
-    | fusion_all | fusion_all | fusion_subgroup | fusion_subgroup |
+    | src_1 | src_2 | ... | pred_1 | pred_2 | ... | mask | pred_mask |
 
 ## Run inference
 Remember that the data located in the input folder must have the file endings as the dataset you trained the model on and must adhere to the nnU-Net naming scheme for image files (see [dataset format](dataset_format.md) and [inference data format](dataset_format_inference.md)!)
@@ -152,7 +135,7 @@ python nnseq2seq/inference/predict_from_raw_data.py \
 nnSeq2Seq_predict -i INPUT_FOLDER -o OUTPUT_FOLDER -d DATASET_ID -c CONFIG -f FOLD_ID -chk CKPT_NAME --infer_all
 ```
 
-Using `--infer_all` to output all the results for each subject. If you only want to output some results, add tags for the corresponding results, e.g., `--infer_input` for normalized input images, `--infer_segment` for segmentation, `--infer_translate` for image-to-image translation, `--infer_fusion` for image fusion, `--infer_latent` for latent space, and `--infer_map` for image-differentiation map.
+Using `--infer_all` to output all the results for each subject. If you only want to output some results, add tags for the corresponding results, e.g., `--infer_input` for normalized input images, `--infer_segment` for segmentation, `--infer_translate` for image-to-image translation.
 
 The results in `OUTPUT_FOLDER` look like this:
 ```
@@ -164,23 +147,11 @@ OUTPUT_FOLDER/
 │   │   ├── norm_src_{ID1}.nii.gz
 │   │   ├── norm_src_{ID2}.nii.gz
 │   │   ├── ...
-│   ├── latent_space
-│   │   ├── latent_space_0.nii.gz
-│   │   ├── latent_space_1.nii.gz
-│   │   ├── latent_space_2.nii.gz
-│   │   ├── latent_space_3.nii.gz
-│   │   ├── latent_space_4.nii.gz
 │   ├── multi2one_inference
 │   │   ├── translate_tgt_{ID1}.nii.gz
 │   │   ├── translate_tgt_{ID2}.nii.gz
 │   │   ├── segmentation.nii.gz
-│   │   ├── fusion.nii.gz
 │   │   ├── ...
-│   ├── explainability_visualization
-│   │   ├── imaging_differentiation_map
-│   │   │   ├── imaging_differentiation_map_tgt_{ID1}.nii.gz
-│   │   │   ├── imaging_differentiation_map_tgt_{ID2}.nii.gz
-│   │   │   ├── ...
 ├── CASE_IDENTIFER_2
 │   ├── ...
 ├── CASE_IDENTIFER_3
@@ -190,11 +161,8 @@ OUTPUT_FOLDER/
 
 Each `CASE_IDENTIFER` has a separate folder where the results can be saved. Results include:
 - `norm_src_{ID}.nii.gz`: Normalized source image of channel `ID`.
-- `latent_space_{level}.nii.gz`: VQC-latent space of all available channels on each level, where `0` for $\times 16$, `1` for $\times 8$, `2` for $\times 4$, `3` for $\times 2$, and `4` for $\times 1$.
 - `translate_tgt_{ID}.nii.gz`: Prediction of translating all available channels to channel `ID`.
 - `segmentation.nii.gz`: Prediction of segmenting using all available channels.
-- `fusion.nii.gz`: Fusion image for all available channels, visual in RGB format.
-- `imaging_differentiation_map_tgt_{ID}.nii.gz`: Imaging differnetiation map of channel `ID`.
 
 
 ### Run inference in your script
@@ -250,30 +218,13 @@ properties = {
 }
 
 # Run inference
-pred, pred_mask, fusion, latent, latent_ind = pipe.predict_from_image_volume(data=data, tgt_seq=target_id, properties=properties)
+pred, pred_mask = pipe.predict_from_image_volume(data=data, tgt_seq=target_id, properties=properties)
 
 # Save output
 sitk.WriteImage(sitk.GetImageFromArray(pred), 'translate_tgt_1.nii.gz')
 sitk.WriteImage(sitk.GetImageFromArray(pred_mask), 'segmentation.nii.gz')
-sitk.WriteImage(sitk.GetImageFromArray(fusion), 'fusion.nii.gz')
-sitk.WriteImage(sitk.GetImageFromArray(latent[0]), 'latent_x16.nii.gz')
-sitk.WriteImage(sitk.GetImageFromArray(latent_ind[4]), 'latent_indice_x1.nii.gz')
 ```
 
-- It's also possible to run inference from latent space.
-```Python
-# Get latent space from image or make it by yourself.
-_, _, _, latent, latent_ind = pipe.predict_from_image_volume(data=data, tgt_seq=target_id, properties=properties)
-
-# Set use_fold
-pipe.load_state_dict_for_one_fold(use_fold=0)
-
-# Run infernece from latent space
-pred = pipe.predict_from_latent_volume(latents=latent, tgt_seq=target_id, properties=properties, latent_focal='dispersion')
-
-# Run infernece from latent space indice
-pred = pipe.predict_from_latent_volume(latents=latent, tgt_seq=target_id, properties=properties, latent_focal='focal_x1', use_ind=True)
-```
 
 - It's also possible to run inference by inputting with `torch.Tensor` image variables and outputing with `torch.Tensor` results.
 ```Python
@@ -288,7 +239,7 @@ slice_id = data.shape[1]//2
 data_slice = data[:,slice_id].unsqueeze(0).to(device='cuda', dtype=torch.half)  # (1,C,W,H)
 
 # Run inference
-pred, pred_mask, fusion, latent = pipe.predict_from_image_slice_tensor(data=data_slice, tgt_seq=target_id, properties=properties)
+pred, pred_mask = pipe.predict_from_image_slice_tensor(data=data_slice, tgt_seq=target_id, properties=properties)
 
 # save as image
 import cv2

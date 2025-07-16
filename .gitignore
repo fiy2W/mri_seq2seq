@@ -6,6 +6,9 @@ private/
 
 # Generated folders during training and validation
 outputs/
+log/
+script/
+dataset_conversion/
 
 # Distribution / packaging
 .Python

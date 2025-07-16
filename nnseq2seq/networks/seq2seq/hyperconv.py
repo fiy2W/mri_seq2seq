@@ -28,10 +28,10 @@ def batch_conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1):
     weight = weight.permute(-1, 0, 1, 2, 3)
     _, c2, _, kernel_height, kernel_width = weight.shape
 
-    input = input.view(1, batch_size * c1, height, width)
+    input = input.reshape((1, batch_size * c1, height, width))
     weight = weight.reshape(batch_size * c2, c1, kernel_height, kernel_width)
     output = F.conv2d(input, weight, bias=None, stride=stride, padding=padding, dilation=dilation, groups=batch_size)
-    output = output.view(batch_size, c2, output.shape[2], output.shape[3])
+    output = output.reshape((batch_size, c2, output.shape[2], output.shape[3]))
     if bias is not None:
         bias = bias.permute(-1, 0).unsqueeze(-1).unsqueeze(-1)
         output = output + bias
@@ -129,6 +129,7 @@ class hyperConv(nn.Module):
             out = batch_conv2d(x, kernel, bias=bias, stride=self.stride, padding=self.padding, dilation=self.dilation)
         elif self.ndims==3:
             out = batch_conv3d(x, kernel, bias=bias, stride=self.stride, padding=self.padding, dilation=self.dilation)
+
         return out
     
 
