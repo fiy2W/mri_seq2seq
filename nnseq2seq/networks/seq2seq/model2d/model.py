@@ -242,8 +242,8 @@ class Encoder(nn.Module):
         self.n_emb_syn = 256
         self.n_emb_seg = 16
 
-        self.conv_in1 = hyperConv(self.style_dim, self.c_in, self.c_enc[0], weight_dim=self.hyper_dim, ksize=3, padding=1, stride=1, ndims=3)
-        self.conv_in2 = hyperConv(self.style_dim, self.c_in, self.c_enc[0], weight_dim=self.hyper_dim, ksize=3, padding=1, stride=1, ndims=3)
+        self.conv_in1 = hyperConv(self.style_dim, self.c_in, self.c_enc[0], weight_dim=self.hyper_dim, ksize=3, padding=1, stride=1, ndims=2)
+        self.conv_in2 = hyperConv(self.style_dim, self.c_in, self.c_enc[0], weight_dim=self.hyper_dim, ksize=3, padding=1, stride=1, ndims=2)
 
         self.fusion = nn.Sequential(
             ResBlock(self.c_enc[0]*2, self.c_enc[1]*2, stride=2, conv_shortcut=False, groups=self.group, up=False, down=True),
